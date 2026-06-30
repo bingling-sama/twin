@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.so
+
+# Virtual environment
+.venv/
+venv/
+
+# uv
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+
+# Data (generated)
+data/
+*.faiss
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+._*
+
+# Test & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Benchmark outputs
+bench_results.json
+
+# Logs
+*.log
+
+# Impeccable (generated critiques)
+.impeccable/critique/
+
+*.txt
