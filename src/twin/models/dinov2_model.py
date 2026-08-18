@@ -72,6 +72,16 @@ def get_embedding_dim() -> int:
     return _dim
 
 
+def get_gpu_name() -> str:
+    """Return the GPU device name if using CUDA, empty string otherwise."""
+    if _device == "cuda" and torch.cuda.is_available():
+        try:
+            return torch.cuda.get_device_name(0)
+        except Exception:
+            pass
+    return ""
+
+
 def encode_image(image: Image.Image) -> "torch.Tensor":
     """Extract DINOv2 image embedding. Returns (1, dim) normalized tensor on device."""
     if _model is None:

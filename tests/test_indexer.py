@@ -7,16 +7,29 @@ from pathlib import Path
 
 import numpy as np
 
-from twin.core.config import Settings
+import pytest
+from twin.core.config import Settings, settings
 from twin.services.indexer import Indexer
 
 
+@pytest.fixture(autouse=True)
+def _reset_indexer_settings():
+    orig_dim = settings.embedding_dim
+    orig_type = settings.model_type
+    settings.embedding_dim = 512
+    settings.model_type = "clip"
+    yield
+    settings.embedding_dim = orig_dim
+    settings.model_type = orig_type
+
+
 def _make_settings(tmpdir: str) -> Settings:
-    return Settings(index_path=tmpdir)
+    return Settings(index_path=tmpdir, embedding_dim=settings.embedding_dim)
 
 
-def _make_vector() -> np.ndarray:
-    return np.random.randn(512).astype(np.float32)
+def _make_vector(dim: int | None = None) -> np.ndarray:
+    d = dim if dim is not None else settings.embedding_dim
+    return np.random.randn(d).astype(np.float32)
 
 
 def test_add_and_search():
@@ -103,7 +116,7 @@ def test_batch_add():
     idx._index = idx._create_index()
     idx._metadata = []
 
-    vectors = np.random.randn(5, 512).astype(np.float32)
+    vectors = np.random.randn(5, settings.embedding_dim).astype(np.float32)
     metas = [{"filename": f"{i}.png"} for i in range(5)]
 
     ids = idx.add_items(vectors, metas)

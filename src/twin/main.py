@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from twin.api.routes import router
 from twin.core.config import settings
-from twin.models.clip_model import load as load_model
+from twin.services.embedding import load_model
 from twin.services.indexer import indexer
 from twin.services.sync import sync_images_dir
 

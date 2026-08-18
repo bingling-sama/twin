@@ -485,7 +485,7 @@ def _collect_disk_info() -> dict:
     return info
 
 
-@pytest.hookimpl(trylast=True)
+@pytest.hookimpl(trylast=True, optionalhook=True)
 def pytest_benchmark_update_machine_info(config, machine_info):
     """Augment benchmark machine_info with detailed system data.
 

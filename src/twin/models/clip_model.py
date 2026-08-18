@@ -62,11 +62,20 @@ def load(
     _tokenizer = open_clip.get_tokenizer(model_name)
     _model = _model.to(_device)
     _model.eval()
-    logger.info("CLIP %s loaded successfully on %s", model_name, _device.upper())
+
+    if hasattr(_model, "visual") and hasattr(_model.visual, "output_dim") and _model.visual.output_dim:
+        _dim = int(_model.visual.output_dim)
+    elif hasattr(_model, "text_projection") and _model.text_projection is not None:
+        _dim = int(_model.text_projection.shape[-1])
+    else:
+        _dim = 512
+
+    logger.info("CLIP %s (dim=%d) loaded successfully on %s", model_name, _dim, _device.upper())
 
 
 _model_name: str = ""
 _pretrained: str = ""
+_dim: int = 512
 
 
 def is_loaded() -> bool:
@@ -81,6 +90,11 @@ def get_device() -> str:
 def get_model_name() -> str:
     """Return the CLIP variant name (e.g. 'ViT-B-32')."""
     return _model_name
+
+
+def get_embedding_dim() -> int:
+    """Return the output embedding dimension (e.g. 512)."""
+    return _dim
 
 
 def get_gpu_name() -> str:

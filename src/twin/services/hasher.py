@@ -64,13 +64,13 @@ def compute_phashes(images: list[Image.Image], max_workers: int = 8) -> list[str
         return list(pool.map(lambda img: str(imagehash.phash(img)), images))
 
 
-_gaussian_window_cache: dict[tuple[str, int], torch.Tensor] = {}
+_gaussian_window_cache: dict[tuple[str, int, int, float], torch.Tensor] = {}
 
 
 def _get_gaussian_window(
     window_size: int = 11, channel: int = 1, sigma: float = 1.5, device: str = "cuda"
 ) -> torch.Tensor:
-    key = (device, window_size)
+    key = (device, window_size, channel, float(sigma))
     if key not in _gaussian_window_cache:
         gauss = torch.tensor([
             np.exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2))
@@ -90,7 +90,7 @@ def compute_ssim_torch(
     size: tuple[int, int] | None = None,
     device: str = "cuda",
 ) -> float:
-    """Compute SSIM using PyTorch on GPU or CPU."""
+    """Compute SSIM using PyTorch on GPU (CUDA/MPS) or CPU."""
     from twin.core.config import settings
 
     if size is None:
@@ -101,7 +101,7 @@ def compute_ssim_torch(
 
     t1 = torch.from_numpy(a).unsqueeze(0).unsqueeze(0).to(device)
     t2 = torch.from_numpy(b).unsqueeze(0).unsqueeze(0).to(device)
-    window = _get_gaussian_window(11, 1, device=device)
+    window = _get_gaussian_window(11, 1, sigma=1.5, device=device)
 
     c1 = (0.01) ** 2
     c2 = (0.03) ** 2
@@ -136,19 +136,32 @@ def compute_ssim(
     """
     Compute SSIM between two images. Returns float in [-1, 1], where 1 = identical.
 
-    Supports automatic GPU acceleration via PyTorch when CUDA is available.
+    Supports automatic GPU acceleration via PyTorch (CUDA / Apple Silicon MPS).
     """
     from twin.core.config import settings
 
-    if use_gpu is None:
-        use_gpu = (
-            settings.ssim_device == "cuda"
-            or (settings.ssim_device == "auto" and torch.cuda.is_available())
-        )
+    target_device = "cpu"
+    if settings.ssim_device == "cuda" and torch.cuda.is_available():
+        target_device = "cuda"
+    elif settings.ssim_device == "mps" and torch.backends.mps.is_available():
+        target_device = "mps"
+    elif settings.ssim_device == "auto":
+        if torch.cuda.is_available():
+            target_device = "cuda"
+        elif torch.backends.mps.is_available():
+            target_device = "mps"
 
-    if use_gpu and torch.cuda.is_available():
+    if use_gpu is False:
+        target_device = "cpu"
+    elif use_gpu is True and target_device == "cpu":
+        if torch.cuda.is_available():
+            target_device = "cuda"
+        elif torch.backends.mps.is_available():
+            target_device = "mps"
+
+    if target_device in ("cuda", "mps"):
         try:
-            return compute_ssim_torch(img1, img2, size=size, device="cuda")
+            return compute_ssim_torch(img1, img2, size=size, device=target_device)
         except Exception:
             pass  # Fallback to skimage
 

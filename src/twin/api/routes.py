@@ -27,7 +27,13 @@ from twin.api.schemas import (
     TextSearchResponse,
 )
 from twin.core.config import settings
-from twin.models.clip_model import get_device, get_gpu_name, get_model_name, is_loaded
+from twin.services.embedding import (
+    get_device,
+    get_gpu_name,
+    get_model_name,
+    is_loaded,
+    is_text_supported,
+)
 from twin.services.index_service import (
     get_batch_status,
     get_task_status,
@@ -75,7 +81,7 @@ async def health():
         indexed_count=indexer.count,
         model_loaded=is_loaded(),
         index_type=indexer.index_type_name,
-        # CLIP runtime
+        # Active model runtime
         device=get_device(),
         model_name=get_model_name(),
         gpu_name=get_gpu_name(),
@@ -121,9 +127,17 @@ async def search_endpoint(file: UploadFile = File(...)):
 )
 async def search_text_endpoint(body: TextSearchRequest):
     """Search for images using a natural language text query via CLIP."""
+    if not is_text_supported():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Current model '{get_model_name() or settings.model_name}' (DINOv2) is vision-only "
+                   "and does not support natural language text search. Use CLIP (e.g. ViT-B-32) for text search.",
+        )
     try:
         result = await asyncio.to_thread(search_by_text, body.query, body.k)
         return TextSearchResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("Text search failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e

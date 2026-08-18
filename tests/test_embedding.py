@@ -5,12 +5,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from twin.models.clip_model import load as load_model
+from twin.core.config import settings
 from twin.services.embedding import (
     compute_embedding,
     compute_embeddings,
     compute_text_embedding,
     compute_text_embeddings,
+    load_model,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -18,7 +19,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _ensure_model():
     """Load CLIP model if not already loaded. load() is idempotent."""
-    load_model()
+    settings.model_type = "clip"
+    settings.embedding_dim = 512
+    settings.model_name = "ViT-B-32"
+    load_model(device="cpu", model_name="ViT-B-32", pretrained="openai")
 
 
 def test_embedding_shape():

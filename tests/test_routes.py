@@ -16,16 +16,39 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture(scope="session")
 def client():
     """Session-scoped TestClient — model loads once."""
+    from twin.core.config import settings
+    if settings.images_path.exists():
+        for p in settings.images_path.iterdir():
+            if p.is_file():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
     with TestClient(app) as c:
         yield c
 
 
 @pytest.fixture(autouse=True)
 def _clear_index():
-    """Reset index state between tests."""
+    """Reset index state and images directory between tests."""
+    from twin.core.config import settings
     indexer.clear()
+    if settings.images_path.exists():
+        for p in settings.images_path.iterdir():
+            if p.is_file():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
     yield
     indexer.clear()
+    if settings.images_path.exists():
+        for p in settings.images_path.iterdir():
+            if p.is_file():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -188,4 +211,17 @@ def test_async_batch_index_endpoint(client, tmp_path):
 
     assert s_data["status"] == "completed"
     assert s_data["indexed"] == 1
+
+
+def test_text_search_dinov2_guard_returns_400(client, monkeypatch):
+    """POST /search/text returns 400 when active model is vision-only (DINOv2)."""
+    from twin.core.config import settings
+    monkeypatch.setattr(settings, "model_type", "dinov2")
+
+    resp = client.post(
+        "/api/v1/search/text",
+        json={"query": "a red car", "k": 5},
+    )
+    assert resp.status_code == 400
+    assert "vision-only" in resp.json()["detail"]
 
