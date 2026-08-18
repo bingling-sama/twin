@@ -45,3 +45,6 @@ bench_results.json
 
 *.txt
 
+# Trellis memory directory
+.trellis/
+

@@ -132,3 +132,60 @@ def test_validate_unsupported_extension(client):
     )
     assert resp.status_code == 400
     assert "Unsupported image format" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Text Search endpoint
+# ---------------------------------------------------------------------------
+def test_text_search_endpoint(client):
+    """search/text returns ranked candidate images."""
+    # Index red and blue
+    with open(FIXTURES / "red.png", "rb") as f:
+        client.post("/api/v1/index", files={"file": ("red.png", f, "image/png")})
+    with open(FIXTURES / "blue.png", "rb") as f:
+        client.post("/api/v1/index", files={"file": ("blue.png", f, "image/png")})
+
+    resp = client.post(
+        "/api/v1/search/text",
+        json={"query": "a red square", "k": 2},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["query"] == "a red square"
+    assert data["count"] == 2
+    assert len(data["results"]) == 2
+    assert data["results"][0]["filename"] in ("red.png", "blue.png")
+
+
+# ---------------------------------------------------------------------------
+# Async Batch Indexing endpoint
+# ---------------------------------------------------------------------------
+def test_async_batch_index_endpoint(client, tmp_path):
+    """POST /index/batch with async_mode=True returns task_id and tracking status."""
+    import time
+    # Copy fixture image to tmp dir
+    img = Image.open(FIXTURES / "red.png")
+    img.save(tmp_path / "test_async_red.png")
+
+    resp = client.post(
+        "/api/v1/index/batch",
+        json={"directory": str(tmp_path), "async_mode": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] in ("started", "running", "completed")
+    task_id = data["task_id"]
+    assert task_id
+
+    # Poll status
+    for _ in range(30):
+        s_resp = client.get(f"/api/v1/index/batch/status/{task_id}")
+        assert s_resp.status_code == 200
+        s_data = s_resp.json()
+        if s_data["status"] == "completed":
+            break
+        time.sleep(0.1)
+
+    assert s_data["status"] == "completed"
+    assert s_data["indexed"] == 1
+

@@ -6,7 +6,12 @@ import numpy as np
 from PIL import Image
 
 from twin.models.clip_model import load as load_model
-from twin.services.embedding import compute_embedding, compute_embeddings
+from twin.services.embedding import (
+    compute_embedding,
+    compute_embeddings,
+    compute_text_embedding,
+    compute_text_embeddings,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -85,3 +90,28 @@ def test_compute_embeddings_empty():
     result = compute_embeddings([])
     assert result.shape == (0, 512)
     assert result.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# Text embedding tests
+# ---------------------------------------------------------------------------
+def test_text_embedding_shape_and_norm():
+    """Text embedding is 512-dim float32 and L2 normalized."""
+    _ensure_model()
+    vec = compute_text_embedding("a red apple")
+    assert isinstance(vec, np.ndarray)
+    assert vec.shape == (512,)
+    assert vec.dtype == np.float32
+    norm = np.linalg.norm(vec)
+    assert abs(norm - 1.0) < 1e-4
+
+
+def test_batch_text_embeddings():
+    """compute_text_embeddings returns (N, 512) array."""
+    _ensure_model()
+    assert compute_text_embeddings([]).shape == (0, 512)
+    texts = ["a red square", "a blue ocean"]
+    vecs = compute_text_embeddings(texts)
+    assert vecs.shape == (2, 512)
+    assert vecs.dtype == np.float32
+
