@@ -12,7 +12,6 @@ from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
 
 from twin.api.schemas import (
-    BatchIndexAsyncResponse,
     BatchIndexRequest,
     BatchIndexResponse,
     ConfigResponse,
@@ -23,20 +22,12 @@ from twin.api.schemas import (
     IndexStatus,
     SearchResponse,
     SyncStatusResponse,
-    TextSearchRequest,
-    TextSearchResponse,
 )
 from twin.core.config import settings
 from twin.models.clip_model import get_device, get_gpu_name, get_model_name, is_loaded
-from twin.services.index_service import (
-    get_batch_status,
-    get_task_status,
-    index_batch,
-    index_batch_async,
-    index_single,
-)
+from twin.services.index_service import get_batch_status, index_batch, index_single
 from twin.services.indexer import indexer
-from twin.services.search import search, search_by_text
+from twin.services.search import search
 from twin.services.sync import get_sync_status
 
 logger = logging.getLogger(__name__)
@@ -114,21 +105,6 @@ async def search_endpoint(file: UploadFile = File(...)):
     return SearchResponse(**result)
 
 
-@router.post(
-    "/search/text",
-    response_model=TextSearchResponse,
-    responses={400: {"model": ErrorResponse}},
-)
-async def search_text_endpoint(body: TextSearchRequest):
-    """Search for images using a natural language text query via CLIP."""
-    try:
-        result = await asyncio.to_thread(search_by_text, body.query, body.k)
-        return TextSearchResponse(**result)
-    except Exception as e:
-        logger.error("Text search failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-
 # ---------------------------------------------------------------------------
 # Index (single)
 # ---------------------------------------------------------------------------
@@ -150,26 +126,11 @@ async def index_endpoint(file: UploadFile = File(...)):
 # ---------------------------------------------------------------------------
 @router.post(
     "/index/batch",
-    response_model=BatchIndexResponse | BatchIndexAsyncResponse,
+    response_model=BatchIndexResponse,
     responses={400: {"model": ErrorResponse}},
 )
-async def index_batch_endpoint(
-    body: BatchIndexRequest,
-    async_mode: bool | None = Query(default=None, description="Override async mode"),
-):
+async def index_batch_endpoint(body: BatchIndexRequest):
     """Index all images in a given directory on disk."""
-    use_async = body.async_mode if async_mode is None else async_mode
-    if use_async:
-        try:
-            task_id = index_batch_async(body.directory)
-            return BatchIndexAsyncResponse(
-                status="started",
-                task_id=task_id,
-                directory=body.directory,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-
     try:
         result = await asyncio.to_thread(index_batch, body.directory)
     except ValueError as e:
@@ -181,19 +142,6 @@ async def index_batch_endpoint(
 async def batch_status_endpoint():
     """Return live progress of the currently running batch index operation."""
     return get_batch_status()
-
-
-@router.get(
-    "/index/batch/status/{task_id}",
-    response_model=BatchIndexAsyncResponse,
-    responses={404: {"model": ErrorResponse}},
-)
-async def batch_task_status_endpoint(task_id: str):
-    """Return status and progress for a specific background batch indexing task."""
-    status = get_task_status(task_id)
-    if status is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    return BatchIndexAsyncResponse(**status)
 
 
 @router.get("/index/rebuild/status")

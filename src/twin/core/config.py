@@ -21,9 +21,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TWIN_", env_file=".env", extra="ignore")
 
     # --- Model ---
-    model_type: str = "clip"  # "clip" | "dinov2"
     model_name: str = "ViT-B-32"
-    dinov2_model_name: str = "vit_small_patch14_dinov2"
     pretrained: str = "openai"
     embedding_dim: int = 512
     device: str = ""  # 'cuda', 'mps', 'cpu', or '' for auto-detect
@@ -48,12 +46,10 @@ class Settings(BaseSettings):
 
     # --- Search ---
     top_k: int = 100
-    ahash_threshold: int = 10   # max Hamming distance for aHash pre-filter
     dhash_threshold: int = 10   # max Hamming distance for dHash duplicate
     phash_threshold: int = 12   # max Hamming distance for pHash duplicate
     ssim_threshold: float = 0.90  # min SSIM for structural duplicate
     ssim_size: int = 128  # resize dimension for SSIM comparison (128 = fast, 256 = precise)
-    ssim_device: str = "auto"  # 'auto' | 'cuda' | 'cpu'
 
     # --- Auto-save ---
     auto_save_interval: int = 120  # seconds between periodic saves; 0 = disable (was 300)

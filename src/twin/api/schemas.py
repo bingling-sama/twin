@@ -25,42 +25,6 @@ class SearchResponse(BaseModel):
     stages: dict = Field(default_factory=dict)
 
 
-# --- Text Search ---
-class TextSearchRequest(BaseModel):
-    query: str = Field(..., description="Natural language search prompt", min_length=1)
-    k: int | None = Field(default=None, description="Number of candidates to retrieve", ge=1, le=1000)
-
-
-class TextSearchResultItem(BaseModel):
-    id: int
-    filename: str
-    distance: float
-    path: str = ""
-    dhash_hex: str = ""
-    phash_hex: str = ""
-
-
-class TextSearchResponse(BaseModel):
-    query: str
-    results: list[TextSearchResultItem]
-    count: int
-    query_time_ms: float
-
-
-# --- Batch Index Async ---
-class BatchIndexAsyncResponse(BaseModel):
-    status: str  # "started" | "running" | "completed" | "failed"
-    task_id: str
-    directory: str = ""
-    total: int = 0
-    indexed: int = 0
-    failed: int = 0
-    skipped: int = 0
-    progress_pct: float = 0.0
-    time_ms: float = 0.0
-    error: str | None = None
-
-
 # --- Index ---
 class IndexStatus(BaseModel):
     status: str  # "indexed" | "already_exists"
@@ -70,7 +34,6 @@ class IndexStatus(BaseModel):
 
 class BatchIndexRequest(BaseModel):
     directory: str = Field(..., description="Path to directory containing images")
-    async_mode: bool = Field(default=False, description="Run in background thread without blocking HTTP response")
 
 
 class BatchIndexResponse(BaseModel):

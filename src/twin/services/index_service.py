@@ -6,7 +6,6 @@ route handlers are thin passthroughs and sync.py can reuse the same logic.
 
 import logging
 import threading
-import uuid
 from pathlib import Path
 
 from PIL import Image
@@ -20,7 +19,7 @@ from twin.utils.image import IMAGE_EXTENSIONS, load_images
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Shared batch-indexing progress & background tasks (thread-safe)
+# Shared batch-indexing progress (thread-safe, polled by GET /index/batch/status)
 # ---------------------------------------------------------------------------
 _batch_lock = threading.Lock()
 _batch_state: dict = {
@@ -33,76 +32,6 @@ _batch_state: dict = {
     "total_batches": 0,
     "_processed_samples": [],  # list of (perf_counter, indexed + failed)
 }
-
-_tasks_lock = threading.Lock()
-_tasks: dict[str, dict] = {}
-
-
-def get_task_status(task_id: str) -> dict | None:
-    """Return status dictionary for a specific task ID, combined with live progress if active."""
-    with _tasks_lock:
-        task = _tasks.get(task_id)
-        if task is None:
-            return None
-        res = dict(task)
-
-    if res["status"] == "running":
-        live = get_batch_status()
-        if live["running"]:
-            res["total"] = live["total"]
-            res["indexed"] = live["indexed"]
-            res["failed"] = live["failed"]
-            res["progress_pct"] = live["progress_pct"]
-            res["time_ms"] = live["elapsed_ms"]
-    return res
-
-
-def index_batch_async(directory: str | Path) -> str:
-    """Launch batch indexing in a background daemon thread and return task_id."""
-    dir_path = Path(directory).expanduser().resolve()
-    if not dir_path.is_dir():
-        raise ValueError(f"Not a directory: {directory}")
-
-    task_id = str(uuid.uuid4())
-    with _tasks_lock:
-        _tasks[task_id] = {
-            "status": "started",
-            "task_id": task_id,
-            "directory": str(dir_path),
-            "total": 0,
-            "indexed": 0,
-            "failed": 0,
-            "skipped": 0,
-            "progress_pct": 0.0,
-            "time_ms": 0.0,
-            "error": None,
-        }
-
-    def _worker():
-        try:
-            with _tasks_lock:
-                _tasks[task_id]["status"] = "running"
-            res = index_batch(dir_path)
-            with _tasks_lock:
-                _tasks[task_id].update(
-                    status="completed",
-                    total=res.get("total", 0),
-                    indexed=res.get("indexed", 0),
-                    failed=res.get("failed", 0),
-                    time_ms=res.get("time_ms", 0.0),
-                    progress_pct=100.0,
-                )
-        except Exception as e:
-            logger.error("Async batch indexing failed for task %s", task_id, exc_info=True)
-            with _tasks_lock:
-                _tasks[task_id].update(
-                    status="failed",
-                    error=str(e),
-                )
-
-    thread = threading.Thread(target=_worker, daemon=True, name=f"batch-index-{task_id[:8]}")
-    thread.start()
-    return task_id
 
 
 def get_batch_status() -> dict:

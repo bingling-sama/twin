@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 _model: Any = None
 _preprocess: Any = None
-_tokenizer: Any = None
 _device: str = ""
 
 
@@ -44,7 +43,7 @@ def load(
         model_name: CLIP variant to load (default: ViT-B-32).
         pretrained: Pretrained weights tag (default: openai).
     """
-    global _model, _preprocess, _tokenizer, _device, _model_name, _pretrained
+    global _model, _preprocess, _device, _model_name, _pretrained
 
     if _model is not None:
         logger.info("CLIP model already loaded, skipping")
@@ -59,7 +58,6 @@ def load(
     _model, _, _preprocess = open_clip.create_model_and_transforms(
         model_name, pretrained=pretrained
     )
-    _tokenizer = open_clip.get_tokenizer(model_name)
     _model = _model.to(_device)
     _model.eval()
     logger.info("CLIP %s loaded successfully on %s", model_name, _device.upper())
@@ -122,44 +120,6 @@ def encode_images(images: list[Image.Image]) -> "torch.Tensor":
 
     with torch.inference_mode():
         features = _model.encode_image(tensors)
-        features = features / features.norm(dim=-1, keepdim=True)
-
-    return features
-
-
-def encode_text(text: str) -> "torch.Tensor":
-    """Extract CLIP text embedding. Returns (1, 512) tensor on the correct device."""
-    if _model is None:
-        raise RuntimeError("CLIP model not loaded. Call load() first.")
-
-    global _tokenizer
-    if _tokenizer is None:
-        import open_clip
-        _tokenizer = open_clip.get_tokenizer(_model_name or "ViT-B-32")
-
-    tokens = _tokenizer([text]).to(_device)
-    with torch.inference_mode():
-        features = _model.encode_text(tokens)
-        features = features / features.norm(dim=-1, keepdim=True)
-
-    return features
-
-
-def encode_texts(texts: list[str]) -> "torch.Tensor":
-    """Batch-encode multiple texts. Returns (N, 512) tensor on the correct device."""
-    if _model is None:
-        raise RuntimeError("CLIP model not loaded. Call load() first.")
-    if not texts:
-        raise ValueError("Empty text list")
-
-    global _tokenizer
-    if _tokenizer is None:
-        import open_clip
-        _tokenizer = open_clip.get_tokenizer(_model_name or "ViT-B-32")
-
-    tokens = _tokenizer(texts).to(_device)
-    with torch.inference_mode():
-        features = _model.encode_text(tokens)
         features = features / features.norm(dim=-1, keepdim=True)
 
     return features
