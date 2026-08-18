@@ -12,7 +12,7 @@ import time
 
 from twin.core.config import settings
 from twin.services.embedding import compute_embeddings
-from twin.services.hasher import compute_dhashes, compute_phashes
+from twin.services.hasher import compute_ahashes, compute_dhashes, compute_phashes
 from twin.services.index_service import _index_single_from_disk
 from twin.services.indexer import indexer
 from twin.utils.image import IMAGE_EXTENSIONS, load_images
@@ -178,16 +178,18 @@ def sync_images_dir() -> dict:
             # Step 2: Batch CLIP embedding (one forward pass for the whole batch)
             vectors = compute_embeddings(imgs)
 
-            # Step 3: Parallel dHash + pHash
+            # Step 3: Parallel aHash + dHash + pHash
+            ahashes = compute_ahashes(imgs)
             dhashes = compute_dhashes(imgs)
             phashes = compute_phashes(imgs)
 
             # Step 4: Build metadata and batch-add to index
             metas = []
-            for path, dh, ph in zip(ok_paths, dhashes, phashes):
+            for path, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes):
                 metas.append({
                     "filename": path.name,
                     "path": str(path),
+                    "ahash": ah,
                     "dhash": dh,
                     "phash": ph,
                 })

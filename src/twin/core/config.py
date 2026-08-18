@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # --- Search ---
     top_k: int = 100
+    rotation_invariant: bool = True  # tolerate 0/90/180/270 deg rotation during dHash verification
     ahash_threshold: int = 10   # max Hamming distance for aHash pre-filter
     dhash_threshold: int = 10   # max Hamming distance for dHash duplicate
     phash_threshold: int = 12   # max Hamming distance for pHash duplicate

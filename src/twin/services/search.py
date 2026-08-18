@@ -20,10 +20,12 @@ from pathlib import Path
 from PIL import Image
 
 from twin.core.config import settings
-from twin.services.embedding import compute_embedding
+from twin.services.embedding import compute_embedding, is_text_supported
 from twin.services.hasher import (
+    compute_ahash,
     compute_dhash,
     compute_phash,
+    compute_rotated_dhashes,
     compute_ssim,
     hamming_distance,
 )
@@ -126,13 +128,15 @@ def search(
     dhash_threshold: int | None = None,
     phash_threshold: int | None = None,
     ssim_threshold: float | None = None,
+    rotation_invariant: bool | None = None,
 ) -> dict:
     """
     Two-stage image search with funnel-based filtering.
 
-    Stage 1: CLIP → Faiss top-K semantic candidates.
+    Stage 1: CLIP/DINOv2 → Faiss top-K semantic candidates.
     Stage 2–4: Sequential filters (dHash → pHash → SSIM), each operating
     only on survivors of the previous stage.
+    Supports rotation tolerance in Stage 2 (0°, 90°, 180°, 270°).
 
     Returns list of result dicts sorted by match_level.
     """
@@ -144,6 +148,8 @@ def search(
         phash_threshold = settings.phash_threshold
     if ssim_threshold is None:
         ssim_threshold = settings.ssim_threshold
+    if rotation_invariant is None:
+        rotation_invariant = settings.rotation_invariant
 
     t0 = time.perf_counter()
     stages: dict[str, dict] = {}  # track per-stage stats + timing
@@ -186,12 +192,22 @@ def search(
     # ==================================================================
     # Stage 2: dHash filter (cheapest, runs on all Faiss survivors)
     # ==================================================================
+    query_dhashes = compute_rotated_dhashes(image) if rotation_invariant else [query_dhash]
+
     dhash_survivors = []
     for c in candidates:
         cand_dhash = c["meta"].get("dhash", "")
-        ok, dist = _passes_hash(query_dhash, cand_dhash, dhash_threshold)
+        if not cand_dhash:
+            c["dhash_distance"] = 999
+            continue
+
+        if rotation_invariant:
+            dist = min(hamming_distance(qh, cand_dhash) for qh in query_dhashes)
+        else:
+            dist = hamming_distance(query_dhash, cand_dhash)
+
         c["dhash_distance"] = dist
-        if ok:
+        if dist <= dhash_threshold:
             c["stages_passed"] += 1
             dhash_survivors.append(c)
     t2 = time.perf_counter()

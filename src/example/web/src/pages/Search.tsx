@@ -106,13 +106,16 @@ const LEVEL_MAP: Record<string, { text: string | null; cls: string }> = {
 export default function Search() {
   const [searchMode, setSearchMode] = useState<"image" | "text">("image");
   const [textPrompt, setTextPrompt] = useState("");
-  const [results, setResults] = useState<SearchResponse | null>(null);
+  const [imageResults, setImageResults] = useState<SearchResponse | null>(null);
+  const [textResults, setTextResults] = useState<TextSearchResponse | null>(null);
+  const [activeResultMode, setActiveResultMode] = useState<"image" | "text">("image");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [selected, setSelected] = useState<SearchResult | null>(null);
+  const [selectedImage, setSelectedImage] = useState<SearchResult | null>(null);
+  const [selectedText, setSelectedText] = useState<TextSearchResultItem | null>(null);
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const revokedRef = useRef<string | null>(null);
@@ -131,7 +134,8 @@ export default function Search() {
     setFile(f);
     showPreview(f);
     setError(null);
-    setResults(null);
+    setImageResults(null);
+    setTextResults(null);
   }
 
   function onDrop(e: DragEvent) { e.preventDefault(); setDragOver(false); accept(e.dataTransfer?.files?.[0] ?? null); }
@@ -140,34 +144,23 @@ export default function Search() {
   async function handleSearch() {
     if (searchMode === "image") {
       if (!file) { setError("Select an image first."); return; }
-      setLoading(true); setError(null); setResults(null);
-      try { setResults(await searchImage(file)); } catch (e: any) { setError(e.response?.data?.detail ?? e.message); }
-      finally { setLoading(false); }
+      setLoading(true); setError(null); setImageResults(null); setTextResults(null);
+      try {
+        const res = await searchImage(file);
+        setImageResults(res);
+        setActiveResultMode("image");
+      } catch (e: any) {
+        setError(e.response?.data?.detail ?? e.message);
+      } finally {
+        setLoading(false);
+      }
     } else {
       if (!textPrompt.trim()) { setError("Enter a search prompt first."); return; }
-      setLoading(true); setError(null); setResults(null);
+      setLoading(true); setError(null); setImageResults(null); setTextResults(null);
       try {
         const res = await searchText(textPrompt.trim(), 50);
-        // Map text search results into SearchResponse structure for consistent display
-        const mappedResults: SearchResult[] = res.results.map((item: TextSearchResultItem) => ({
-          id: item.id,
-          filename: item.filename,
-          distance: item.distance,
-          match_level: "none",
-          stages_passed: 0,
-          dhash_distance: 999,
-          phash_distance: 999,
-          ssim_score: 0,
-          dhash_hex: item.dhash_hex,
-          phash_hex: item.phash_hex,
-          path: item.path,
-        }));
-        setResults({
-          results: mappedResults,
-          count: res.count,
-          query_time_ms: res.query_time_ms,
-          stages: { faiss: { in: 0, out: res.count, elapsed_ms: res.query_time_ms } },
-        });
+        setTextResults(res);
+        setActiveResultMode("text");
       } catch (e: any) {
         setError(e.response?.data?.detail ?? e.message);
       } finally {
@@ -190,7 +183,7 @@ export default function Search() {
             className={`px-4 py-1.5 rounded-full text-xs font-semibold cursor-pointer transition ${
               searchMode === "image" ? "bg-white text-ink shadow-sm" : "text-slate hover:text-ink"
             }`}
-            onClick={() => { setSearchMode("image"); setError(null); setResults(null); }}
+            onClick={() => { setSearchMode("image"); setError(null); }}
           >
             Image Search
           </button>
@@ -198,7 +191,7 @@ export default function Search() {
             className={`px-4 py-1.5 rounded-full text-xs font-semibold cursor-pointer transition ${
               searchMode === "text" ? "bg-white text-ink shadow-sm" : "text-slate hover:text-ink"
             }`}
-            onClick={() => { setSearchMode("text"); setError(null); setResults(null); }}
+            onClick={() => { setSearchMode("text"); setError(null); }}
           >
             Text Search (CLIP)
           </button>
@@ -262,32 +255,32 @@ export default function Search() {
 
       {error && <div className="bg-danger-soft border border-red-200 text-danger px-4 py-2.5 rounded-lg my-3 text-sm">{error}</div>}
 
-      {/* Results */}
-      {results && (
+      {/* Image Search Results */}
+      {activeResultMode === "image" && imageResults && (
         <div>
           <p className="text-sm text-slate mb-4 flex flex-wrap items-center gap-3">
-            <span>{results.count} result{results.count !== 1 ? "s" : ""} in {results.query_time_ms}ms</span>
-            {results.stages && (
+            <span>{imageResults.count} result{imageResults.count !== 1 ? "s" : ""} in {imageResults.query_time_ms}ms</span>
+            {imageResults.stages && (
               <span className="inline-flex flex-wrap gap-1 items-center">
                 {(["faiss","dhash","phash","ssim"] as const).map((name, i, arr) => {
-                  const s = results.stages[name];
+                  const s = imageResults.stages[name];
                   if (!s) return null;
                   return [
                     <span key={name} className="inline-block bg-surface border border-hairline px-2 py-0.5 rounded font-mono text-xs text-slate">
                       {name}: {s.out}/{s.in} <small className="text-muted">{s.elapsed_ms}ms</small>
                     </span>,
-                    i < arr.length - 1 && results.stages[arr[i + 1]] ? <span key={`s${i}`} className="text-muted">→</span> : null,
+                    i < arr.length - 1 && imageResults.stages[arr[i + 1]] ? <span key={`s${i}`} className="text-muted">→</span> : null,
                   ];
                 })}
               </span>
             )}
           </p>
 
-          {results.results.length === 0 ? (
+          {imageResults.results.length === 0 ? (
             <p className="text-muted mt-3 text-sm">No results. The index may be empty, or no images matched your filters.</p>
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
-              {results.results.map((r) => {
+              {imageResults.results.map((r) => {
                 const lv = LEVEL_MAP[r.match_level];
                 return (
                   <div
@@ -296,7 +289,7 @@ export default function Search() {
                       r.match_level === "confirmed" ? "border-brand-green-mid shadow-sm" :
                       r.match_level === "suspected" ? "border-accent-orange" : "border-hairline"
                     }`}
-                    onClick={() => { setSelected(r); setImageMeta(null); }}
+                    onClick={() => { setSelectedImage(r); setSelectedText(null); setImageMeta(null); }}
                   >
                     <div className="relative aspect-square bg-surface">
                       <img src={imageUrl(r.filename)} alt={r.filename} loading="lazy" className="w-full h-full object-contain block" />
@@ -319,35 +312,95 @@ export default function Search() {
         </div>
       )}
 
-      {/* Fullscreen preview */}
-      {selected && (
+      {/* Text Search Results */}
+      {activeResultMode === "text" && textResults && (
+        <div>
+          <p className="text-sm text-slate mb-4 flex flex-wrap items-center gap-3">
+            <span>{textResults.count} result{textResults.count !== 1 ? "s" : ""} for <strong className="text-ink">"{textResults.query}"</strong> in {textResults.query_time_ms}ms</span>
+            <span className="inline-block bg-surface border border-hairline px-2 py-0.5 rounded font-mono text-xs text-brand-green-dark">
+              CLIP Semantic Recall
+            </span>
+          </p>
+
+          {textResults.results.length === 0 ? (
+            <p className="text-muted mt-3 text-sm">No images matched your query.</p>
+          ) : (
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
+              {textResults.results.map((r) => (
+                <div
+                  key={r.id}
+                  className="bg-white border border-hairline rounded-xl overflow-hidden cursor-pointer hover:border-brand-green transition"
+                  onClick={() => { setSelectedText(r); setSelectedImage(null); setImageMeta(null); }}
+                >
+                  <div className="relative aspect-square bg-surface">
+                    <img src={imageUrl(r.filename)} alt={r.filename} loading="lazy" className="w-full h-full object-contain block" />
+                  </div>
+                  <div className="px-2 py-1.5">
+                    <span className="block text-xs font-medium text-ink truncate" title={r.filename}>{r.filename}</span>
+                    <span className="block text-[11px] text-steel mt-0.5">Distance: {r.distance.toFixed(4)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Fullscreen Image Preview */}
+      {selectedImage && (
         <div
           className="fixed inset-0 bg-brand-teal-deep/60 flex items-center justify-center z-100"
-          onClick={() => setSelected(null)}
-          onKeyDown={(e) => { if (e.key === "Escape") setSelected(null); }}
+          onClick={() => setSelectedImage(null)}
+          onKeyDown={(e) => { if (e.key === "Escape") setSelectedImage(null); }}
         >
           <div className="bg-white rounded-xl p-6 w-[min(95vw,1100px)] max-h-[92vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-0">
-              <strong className="text-sm text-ink">{selected.filename}</strong>
-              <button className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none" onClick={() => setSelected(null)}>×</button>
+              <strong className="text-sm text-ink">{selectedImage.filename}</strong>
+              <button className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none" onClick={() => setSelectedImage(null)}>×</button>
             </div>
-            <ZoomImage src={imageUrl(selected.filename)} alt={selected.filename} onMeta={setImageMeta} />
+            <ZoomImage src={imageUrl(selectedImage.filename)} alt={selectedImage.filename} onMeta={setImageMeta} />
             <table className="text-[13px] border-none mt-3">
               <tbody>
                 {imageMeta && <tr><td className="text-stone font-normal pr-3 py-1">Dimensions</td><td className="py-1">{imageMeta.width} × {imageMeta.height} px</td></tr>}
-                {selected.path && <tr><td className="text-stone font-normal pr-3 py-1">Path</td><td className="font-mono text-xs break-all py-1">{selected.path}</td></tr>}
-                {selected.dhash_hex && <tr><td className="text-stone font-normal pr-3 py-1">dHash hex</td><td className="font-mono text-xs py-1">{selected.dhash_hex}</td></tr>}
-                {selected.phash_hex && <tr><td className="text-stone font-normal pr-3 py-1">pHash hex</td><td className="font-mono text-xs py-1">{selected.phash_hex}</td></tr>}
+                {selectedImage.path && <tr><td className="text-stone font-normal pr-3 py-1">Path</td><td className="font-mono text-xs break-all py-1">{selectedImage.path}</td></tr>}
+                {selectedImage.dhash_hex && <tr><td className="text-stone font-normal pr-3 py-1">dHash hex</td><td className="font-mono text-xs py-1">{selectedImage.dhash_hex}</td></tr>}
+                {selectedImage.phash_hex && <tr><td className="text-stone font-normal pr-3 py-1">pHash hex</td><td className="font-mono text-xs py-1">{selectedImage.phash_hex}</td></tr>}
                 <tr><td className="text-stone font-normal pr-3 py-1">Match</td><td className="py-1">
-                  <span className={`inline-block text-[13px] font-semibold px-2 py-0.5 rounded-sm text-white ${selected.match_level === "confirmed" ? "bg-brand-green-dark" : selected.match_level === "suspected" ? "bg-accent-orange" : ""}`}>
-                    {selected.match_level}
+                  <span className={`inline-block text-[13px] font-semibold px-2 py-0.5 rounded-sm text-white ${selectedImage.match_level === "confirmed" ? "bg-brand-green-dark" : selectedImage.match_level === "suspected" ? "bg-accent-orange" : ""}`}>
+                    {selectedImage.match_level}
                   </span>
                 </td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">L2 Distance</td><td className="py-1">{selected.distance.toFixed(6)}</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">dHash</td><td className="py-1">{selected.dhash_distance} / 64</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">pHash</td><td className="py-1">{selected.phash_distance} / 64</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">SSIM</td><td className="py-1">{selected.ssim_score.toFixed(4)}</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">Filters passed</td><td className="py-1">{selected.stages_passed} / 3</td></tr>
+                <tr><td className="text-stone font-normal pr-3 py-1">L2 Distance</td><td className="py-1">{selectedImage.distance.toFixed(6)}</td></tr>
+                <tr><td className="text-stone font-normal pr-3 py-1">dHash</td><td className="py-1">{selectedImage.dhash_distance} / 64</td></tr>
+                <tr><td className="text-stone font-normal pr-3 py-1">pHash</td><td className="py-1">{selectedImage.phash_distance} / 64</td></tr>
+                <tr><td className="text-stone font-normal pr-3 py-1">SSIM</td><td className="py-1">{selectedImage.ssim_score.toFixed(4)}</td></tr>
+                <tr><td className="text-stone font-normal pr-3 py-1">Filters passed</td><td className="py-1">{selectedImage.stages_passed} / 3</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen Text Search Item Preview */}
+      {selectedText && (
+        <div
+          className="fixed inset-0 bg-brand-teal-deep/60 flex items-center justify-center z-100"
+          onClick={() => setSelectedText(null)}
+          onKeyDown={(e) => { if (e.key === "Escape") setSelectedText(null); }}
+        >
+          <div className="bg-white rounded-xl p-6 w-[min(95vw,1100px)] max-h-[92vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-0">
+              <strong className="text-sm text-ink">{selectedText.filename}</strong>
+              <button className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none" onClick={() => setSelectedText(null)}>×</button>
+            </div>
+            <ZoomImage src={imageUrl(selectedText.filename)} alt={selectedText.filename} onMeta={setImageMeta} />
+            <table className="text-[13px] border-none mt-3">
+              <tbody>
+                {imageMeta && <tr><td className="text-stone font-normal pr-3 py-1">Dimensions</td><td className="py-1">{imageMeta.width} × {imageMeta.height} px</td></tr>}
+                {selectedText.path && <tr><td className="text-stone font-normal pr-3 py-1">Path</td><td className="font-mono text-xs break-all py-1">{selectedText.path}</td></tr>}
+                <tr><td className="text-stone font-normal pr-3 py-1">L2 Distance</td><td className="py-1">{selectedText.distance.toFixed(6)}</td></tr>
+                {selectedText.dhash_hex && <tr><td className="text-stone font-normal pr-3 py-1">dHash hex</td><td className="font-mono text-xs py-1">{selectedText.dhash_hex}</td></tr>}
+                {selectedText.phash_hex && <tr><td className="text-stone font-normal pr-3 py-1">pHash hex</td><td className="font-mono text-xs py-1">{selectedText.phash_hex}</td></tr>}
               </tbody>
             </table>
           </div>
