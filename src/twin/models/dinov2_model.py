@@ -31,7 +31,8 @@ def load(
 
     Args:
         device: Override device selection ('cuda', 'mps', 'cpu').
-        model_name: DINOv2 model variant from timm (e.g. 'vit_small_patch14_dinov2', 'vit_base_patch14_dinov2').
+        model_name: DINOv2 model variant from timm
+            (e.g. 'vit_small_patch14_dinov2', 'vit_base_patch14_dinov2').
     """
     global _model, _preprocess, _device, _model_name, _dim
 

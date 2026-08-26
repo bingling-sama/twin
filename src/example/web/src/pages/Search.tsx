@@ -103,6 +103,145 @@ const LEVEL_MAP: Record<string, { text: string | null; cls: string }> = {
   none:      { text: null, cls: "" },
 };
 
+interface ResultPreviewModalProps {
+  filename: string;
+  path?: string;
+  distance: number;
+  dhash_hex?: string;
+  phash_hex?: string;
+  match_level?: string;
+  dhash_distance?: number;
+  phash_distance?: number;
+  ssim_score?: number;
+  stages_passed?: number;
+  onClose: () => void;
+  onMeta: (m: ImageMeta) => void;
+  imageMeta: ImageMeta | null;
+}
+
+function ResultPreviewModal({
+  filename,
+  path,
+  distance,
+  dhash_hex,
+  phash_hex,
+  match_level,
+  dhash_distance,
+  phash_distance,
+  ssim_score,
+  stages_passed,
+  onClose,
+  onMeta,
+  imageMeta,
+}: ResultPreviewModalProps) {
+  const isImageSearch = match_level !== undefined;
+
+  return (
+    <div
+      className="fixed inset-0 bg-brand-teal-deep/60 flex items-center justify-center z-100"
+      onClick={onClose}
+      onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
+    >
+      <div
+        className="bg-white rounded-xl p-6 w-[min(95vw,1100px)] max-h-[92vh] flex flex-col shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex justify-between items-center mb-0">
+          <strong className="text-sm text-ink">{filename}</strong>
+          <button
+            className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+        <ZoomImage src={imageUrl(filename)} alt={filename} onMeta={onMeta} />
+        <table className="text-[13px] border-none mt-3">
+          <tbody>
+            {imageMeta && (
+              <tr>
+                <td className="text-stone font-normal pr-3 py-1">Dimensions</td>
+                <td className="py-1">{imageMeta.width} × {imageMeta.height} px</td>
+              </tr>
+            )}
+            {path && (
+              <tr>
+                <td className="text-stone font-normal pr-3 py-1">Path</td>
+                <td className="font-mono text-xs break-all py-1">{path}</td>
+              </tr>
+            )}
+            {dhash_hex && (
+              <tr>
+                <td className="text-stone font-normal pr-3 py-1">dHash hex</td>
+                <td className="font-mono text-xs py-1">{dhash_hex}</td>
+              </tr>
+            )}
+            {phash_hex && (
+              <tr>
+                <td className="text-stone font-normal pr-3 py-1">pHash hex</td>
+                <td className="font-mono text-xs py-1">{phash_hex}</td>
+              </tr>
+            )}
+            {isImageSearch ? (
+              <>
+                <tr>
+                  <td className="text-stone font-normal pr-3 py-1">Match</td>
+                  <td className="py-1">
+                    <span
+                      className={`inline-block text-[13px] font-semibold px-2 py-0.5 rounded-sm text-white ${
+                        match_level === "confirmed"
+                          ? "bg-brand-green-dark"
+                          : match_level === "suspected"
+                          ? "bg-accent-orange"
+                          : ""
+                      }`}
+                    >
+                      {match_level}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td className="text-stone font-normal pr-3 py-1">L2 Distance</td>
+                  <td className="py-1">{distance.toFixed(6)}</td>
+                </tr>
+                {dhash_distance !== undefined && (
+                  <tr>
+                    <td className="text-stone font-normal pr-3 py-1">dHash</td>
+                    <td className="py-1">{dhash_distance} / 64</td>
+                  </tr>
+                )}
+                {phash_distance !== undefined && (
+                  <tr>
+                    <td className="text-stone font-normal pr-3 py-1">pHash</td>
+                    <td className="py-1">{phash_distance} / 64</td>
+                  </tr>
+                )}
+                {ssim_score !== undefined && (
+                  <tr>
+                    <td className="text-stone font-normal pr-3 py-1">SSIM</td>
+                    <td className="py-1">{ssim_score.toFixed(4)}</td>
+                  </tr>
+                )}
+                {stages_passed !== undefined && (
+                  <tr>
+                    <td className="text-stone font-normal pr-3 py-1">Filters passed</td>
+                    <td className="py-1">{stages_passed} / 3</td>
+                  </tr>
+                )}
+              </>
+            ) : (
+              <tr>
+                <td className="text-stone font-normal pr-3 py-1">L2 Distance</td>
+                <td className="py-1">{distance.toFixed(6)}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function Search() {
   const [searchMode, setSearchMode] = useState<"image" | "text">("image");
   const [textPrompt, setTextPrompt] = useState("");
@@ -198,9 +337,9 @@ export default function Search() {
         </div>
       </div>
 
-      {/* Input zone */}
-      <section className="mb-6">
-        {searchMode === "image" ? (
+      {/* Query Form */}
+      {searchMode === "image" ? (
+        <div className="flex flex-col gap-3">
           <div
             className={zoneCls}
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -208,94 +347,115 @@ export default function Search() {
             onDrop={onDrop}
             onClick={() => fileRef.current?.click()}
           >
-            <input type="file" accept="image/*" ref={fileRef} onChange={onChange} hidden />
-
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/bmp"
+              className="hidden"
+              onChange={onChange}
+            />
             {previewUrl ? (
-              <div className="flex flex-col items-center gap-2">
-                <img src={previewUrl} alt="Preview" className="max-w-[260px] max-h-[200px] object-contain rounded-lg border border-hairline" />
-                <span className="text-[13px] font-medium text-slate">{file?.name}</span>
+              <div className="flex items-center gap-3">
+                <img src={previewUrl} alt="Query preview" className="w-16 h-16 object-cover rounded-lg border border-hairline" />
+                <div className="text-left flex-1 min-w-0">
+                  <p className="text-sm font-medium text-ink truncate">{file?.name}</p>
+                  <p className="text-xs text-muted">{file ? (file.size / 1024).toFixed(1) + " KB" : ""}</p>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-muted hover:text-ink px-2 py-1 rounded hover:bg-surface cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); setFile(null); setPreviewUrl(null); }}
+                >
+                  Change
+                </button>
               </div>
             ) : (
-              <div className="pointer-events-none">
-                <div className="text-[32px] text-muted mb-3 leading-none">↑</div>
-                <p className="text-base text-slate">Drop an image here, or <span className="text-brand-green-dark font-medium">browse</span></p>
-                <p className="text-[13px] text-stone mt-1">PNG, JPEG, WebP, BMP — any size</p>
+              <div>
+                <p className="text-sm font-medium text-ink">Drop an image here or click to browse</p>
+                <p className="text-xs text-muted mt-1">JPEG, PNG, WebP, BMP up to 50MB</p>
               </div>
             )}
           </div>
-        ) : (
-          <div className="bg-white border border-hairline rounded-xl p-5 shadow-xs">
-            <label className="block text-xs font-medium text-slate mb-2">Natural Language Prompt (English / Multi-lingual CLIP)</label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={textPrompt}
-                onChange={(e) => setTextPrompt(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
-                placeholder="e.g., a photo of a red sports car, a dog running in snow, anime character..."
-                className="flex-1 bg-surface border border-hairline rounded-lg px-4 py-2.5 text-sm text-ink placeholder:text-muted focus:outline-none focus:border-brand-green"
-              />
+          <button
+            className="w-full py-2.5 px-4 bg-brand-green text-ink font-semibold rounded-lg hover:bg-brand-green-hover transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            onClick={handleSearch}
+            disabled={!file || loading}
+          >
+            {loading ? "Searching..." : "Search Similar Images"}
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="relative">
+            <input
+              type="text"
+              value={textPrompt}
+              onChange={(e) => setTextPrompt(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
+              placeholder="e.g. A cat sitting on a laptop, red sports car, snowy mountain peak..."
+              className="w-full px-4 py-3 bg-white border border-hairline rounded-xl text-sm text-ink placeholder:text-muted focus:outline-none focus:border-brand-green"
+            />
+          </div>
+          <button
+            className="w-full py-2.5 px-4 bg-brand-green text-ink font-semibold rounded-lg hover:bg-brand-green-hover transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            onClick={handleSearch}
+            disabled={!textPrompt.trim() || loading}
+          >
+            {loading ? "Searching..." : "Search with Text"}
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* Funnel Stage Timeline (Image Search) */}
+      {activeResultMode === "image" && imageResults && (
+        <div className="mt-6 mb-6">
+          <div className="bg-surface rounded-xl p-4 border border-hairline">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-semibold text-slate uppercase tracking-wider">Search Funnel Stages</span>
+              <span className="text-xs font-mono text-steel">{imageResults.query_time_ms} ms total</span>
+            </div>
+            <div className="grid grid-cols-4 gap-2 text-center">
+              {Object.entries(imageResults.stages).map(([stage, info]) => (
+                <div key={stage} className="bg-white rounded-lg p-2.5 border border-hairline">
+                  <div className="text-[11px] font-semibold text-slate uppercase">{stage}</div>
+                  <div className="text-lg font-bold text-ink mt-0.5">{info.out}</div>
+                  <div className="text-[10px] text-muted">{info.elapsed_ms}ms</div>
+                </div>
+              ))}
             </div>
           </div>
-        )}
-
-        <div className="flex items-center gap-4 mt-4">
-          <button
-            className="bg-brand-green text-brand-teal-deep px-[22px] py-2.5 rounded-full text-sm font-semibold cursor-pointer disabled:opacity-50 hover:opacity-95"
-            onClick={handleSearch}
-            disabled={loading || (searchMode === "image" ? !file : !textPrompt.trim())}
-          >
-            {loading ? "Searching..." : "Search"}
-          </button>
-          {searchMode === "image" && file && (
-            <span className="text-[13px] text-stone">{file.name} ({(file.size / 1024).toFixed(0)} KB)</span>
-          )}
         </div>
-      </section>
-
-      {error && <div className="bg-danger-soft border border-red-200 text-danger px-4 py-2.5 rounded-lg my-3 text-sm">{error}</div>}
+      )}
 
       {/* Image Search Results */}
       {activeResultMode === "image" && imageResults && (
         <div>
-          <p className="text-sm text-slate mb-4 flex flex-wrap items-center gap-3">
-            <span>{imageResults.count} result{imageResults.count !== 1 ? "s" : ""} in {imageResults.query_time_ms}ms</span>
-            {imageResults.stages && (
-              <span className="inline-flex flex-wrap gap-1 items-center">
-                {(["faiss","dhash","phash","ssim"] as const).map((name, i, arr) => {
-                  const s = imageResults.stages[name];
-                  if (!s) return null;
-                  return [
-                    <span key={name} className="inline-block bg-surface border border-hairline px-2 py-0.5 rounded font-mono text-xs text-slate">
-                      {name}: {s.out}/{s.in} <small className="text-muted">{s.elapsed_ms}ms</small>
-                    </span>,
-                    i < arr.length - 1 && imageResults.stages[arr[i + 1]] ? <span key={`s${i}`} className="text-muted">→</span> : null,
-                  ];
-                })}
-              </span>
-            )}
+          <p className="text-sm text-slate mb-4">
+            {imageResults.count} candidate{imageResults.count !== 1 ? "s" : ""} evaluated in {imageResults.query_time_ms}ms
           </p>
-
           {imageResults.results.length === 0 ? (
-            <p className="text-muted mt-3 text-sm">No results. The index may be empty, or no images matched your filters.</p>
+            <p className="text-muted mt-3 text-sm">No similar images found in the index.</p>
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
               {imageResults.results.map((r) => {
-                const lv = LEVEL_MAP[r.match_level];
+                const badge = LEVEL_MAP[r.match_level];
                 return (
                   <div
                     key={r.id}
-                    className={`bg-white border rounded-xl overflow-hidden cursor-pointer transition ${
-                      r.match_level === "confirmed" ? "border-brand-green-mid shadow-sm" :
-                      r.match_level === "suspected" ? "border-accent-orange" : "border-hairline"
-                    }`}
+                    className="bg-white border border-hairline rounded-xl overflow-hidden cursor-pointer hover:border-brand-green transition"
                     onClick={() => { setSelectedImage(r); setSelectedText(null); setImageMeta(null); }}
                   >
                     <div className="relative aspect-square bg-surface">
                       <img src={imageUrl(r.filename)} alt={r.filename} loading="lazy" className="w-full h-full object-contain block" />
-                      {lv.text && (
-                        <span className={`absolute top-1 right-1 text-[11px] font-semibold tracking-wide px-2 py-0.5 rounded text-white ${lv.cls}`}>
-                          {lv.text}
+                      {badge?.text && (
+                        <span className={`absolute top-1.5 right-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded text-white ${badge.cls}`}>
+                          {badge.text}
                         </span>
                       )}
                     </div>
@@ -346,65 +506,22 @@ export default function Search() {
         </div>
       )}
 
-      {/* Fullscreen Image Preview */}
+      {/* Result Preview Modal */}
       {selectedImage && (
-        <div
-          className="fixed inset-0 bg-brand-teal-deep/60 flex items-center justify-center z-100"
-          onClick={() => setSelectedImage(null)}
-          onKeyDown={(e) => { if (e.key === "Escape") setSelectedImage(null); }}
-        >
-          <div className="bg-white rounded-xl p-6 w-[min(95vw,1100px)] max-h-[92vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-0">
-              <strong className="text-sm text-ink">{selectedImage.filename}</strong>
-              <button className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none" onClick={() => setSelectedImage(null)}>×</button>
-            </div>
-            <ZoomImage src={imageUrl(selectedImage.filename)} alt={selectedImage.filename} onMeta={setImageMeta} />
-            <table className="text-[13px] border-none mt-3">
-              <tbody>
-                {imageMeta && <tr><td className="text-stone font-normal pr-3 py-1">Dimensions</td><td className="py-1">{imageMeta.width} × {imageMeta.height} px</td></tr>}
-                {selectedImage.path && <tr><td className="text-stone font-normal pr-3 py-1">Path</td><td className="font-mono text-xs break-all py-1">{selectedImage.path}</td></tr>}
-                {selectedImage.dhash_hex && <tr><td className="text-stone font-normal pr-3 py-1">dHash hex</td><td className="font-mono text-xs py-1">{selectedImage.dhash_hex}</td></tr>}
-                {selectedImage.phash_hex && <tr><td className="text-stone font-normal pr-3 py-1">pHash hex</td><td className="font-mono text-xs py-1">{selectedImage.phash_hex}</td></tr>}
-                <tr><td className="text-stone font-normal pr-3 py-1">Match</td><td className="py-1">
-                  <span className={`inline-block text-[13px] font-semibold px-2 py-0.5 rounded-sm text-white ${selectedImage.match_level === "confirmed" ? "bg-brand-green-dark" : selectedImage.match_level === "suspected" ? "bg-accent-orange" : ""}`}>
-                    {selectedImage.match_level}
-                  </span>
-                </td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">L2 Distance</td><td className="py-1">{selectedImage.distance.toFixed(6)}</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">dHash</td><td className="py-1">{selectedImage.dhash_distance} / 64</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">pHash</td><td className="py-1">{selectedImage.phash_distance} / 64</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">SSIM</td><td className="py-1">{selectedImage.ssim_score.toFixed(4)}</td></tr>
-                <tr><td className="text-stone font-normal pr-3 py-1">Filters passed</td><td className="py-1">{selectedImage.stages_passed} / 3</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <ResultPreviewModal
+          {...selectedImage}
+          onClose={() => setSelectedImage(null)}
+          onMeta={setImageMeta}
+          imageMeta={imageMeta}
+        />
       )}
-
-      {/* Fullscreen Text Search Item Preview */}
       {selectedText && (
-        <div
-          className="fixed inset-0 bg-brand-teal-deep/60 flex items-center justify-center z-100"
-          onClick={() => setSelectedText(null)}
-          onKeyDown={(e) => { if (e.key === "Escape") setSelectedText(null); }}
-        >
-          <div className="bg-white rounded-xl p-6 w-[min(95vw,1100px)] max-h-[92vh] flex flex-col shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-0">
-              <strong className="text-sm text-ink">{selectedText.filename}</strong>
-              <button className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none" onClick={() => setSelectedText(null)}>×</button>
-            </div>
-            <ZoomImage src={imageUrl(selectedText.filename)} alt={selectedText.filename} onMeta={setImageMeta} />
-            <table className="text-[13px] border-none mt-3">
-              <tbody>
-                {imageMeta && <tr><td className="text-stone font-normal pr-3 py-1">Dimensions</td><td className="py-1">{imageMeta.width} × {imageMeta.height} px</td></tr>}
-                {selectedText.path && <tr><td className="text-stone font-normal pr-3 py-1">Path</td><td className="font-mono text-xs break-all py-1">{selectedText.path}</td></tr>}
-                <tr><td className="text-stone font-normal pr-3 py-1">L2 Distance</td><td className="py-1">{selectedText.distance.toFixed(6)}</td></tr>
-                {selectedText.dhash_hex && <tr><td className="text-stone font-normal pr-3 py-1">dHash hex</td><td className="font-mono text-xs py-1">{selectedText.dhash_hex}</td></tr>}
-                {selectedText.phash_hex && <tr><td className="text-stone font-normal pr-3 py-1">pHash hex</td><td className="font-mono text-xs py-1">{selectedText.phash_hex}</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <ResultPreviewModal
+          {...selectedText}
+          onClose={() => setSelectedText(null)}
+          onMeta={setImageMeta}
+          imageMeta={imageMeta}
+        />
       )}
     </div>
   );

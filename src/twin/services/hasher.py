@@ -11,10 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import imagehash
 import numpy as np
+import torch
+import torch.nn.functional as F  # noqa: N812
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
-import torch
-import torch.nn.functional as F
+
 
 # ---------------------------------------------------------------------------
 # aHash
@@ -72,14 +73,17 @@ def _get_gaussian_window(
 ) -> torch.Tensor:
     key = (device, window_size, channel, float(sigma))
     if key not in _gaussian_window_cache:
-        gauss = torch.tensor([
-            np.exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2))
-            for x in range(window_size)
-        ], dtype=torch.float32)
+        gauss = torch.tensor(
+            [
+                np.exp(-((x - window_size // 2) ** 2) / float(2 * sigma**2))
+                for x in range(window_size)
+            ],
+            dtype=torch.float32,
+        )
         gauss = gauss / gauss.sum()
-        _1D_window = gauss.unsqueeze(1)
-        _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-        window = _2D_window.expand(channel, 1, window_size, window_size).contiguous().to(device)
+        win_1d = gauss.unsqueeze(1)
+        win_2d = win_1d.mm(win_1d.t()).float().unsqueeze(0).unsqueeze(0)
+        window = win_2d.expand(channel, 1, window_size, window_size).contiguous().to(device)
         _gaussian_window_cache[key] = window
     return _gaussian_window_cache[key]
 
@@ -190,6 +194,24 @@ def is_duplicate(hash1: str, hash2: str, threshold: int = 10) -> bool:
 # ---------------------------------------------------------------------------
 # Rotation invariant helpers (0°, 90°, 180°, 270°)
 # ---------------------------------------------------------------------------
+ROTATION_ANGLES = [
+    None,  # 0° — no transform
+    Image.Transpose.ROTATE_90,  # 90° clockwise
+    Image.Transpose.ROTATE_180,  # 180°
+    Image.Transpose.ROTATE_270,  # 270° clockwise (90° counter-clockwise)
+]
+
+
+def rotate_image(image: Image.Image, rotation_index: int | None = 0) -> Image.Image:
+    """Rotate image by rotation_index: 0=0°, 1=90°, 2=180°, 3=270°."""
+    if not rotation_index:
+        return image
+    method = ROTATION_ANGLES[rotation_index % 4]
+    if method is None:
+        return image
+    return image.transpose(method)
+
+
 def compute_rotated_dhashes(image: Image.Image) -> list[str]:
     """Compute dHash for image in 4 orthogonal orientations (0°, 90°, 180°, 270°)."""
     return [
@@ -200,8 +222,17 @@ def compute_rotated_dhashes(image: Image.Image) -> list[str]:
     ]
 
 
+def compute_rotated_phashes(image: Image.Image) -> list[str]:
+    """Compute pHash for image in 4 orthogonal orientations (0°, 90°, 180°, 270°)."""
+    return [
+        str(imagehash.phash(image)),
+        str(imagehash.phash(image.transpose(Image.Transpose.ROTATE_90))),
+        str(imagehash.phash(image.transpose(Image.Transpose.ROTATE_180))),
+        str(imagehash.phash(image.transpose(Image.Transpose.ROTATE_270))),
+    ]
+
+
 def min_rotated_hamming_distance(hash_hex: str, target_image: Image.Image) -> int:
     """Compute minimum Hamming distance across 4 orthogonal rotations of target image."""
     target_hashes = compute_rotated_dhashes(target_image)
     return min(hamming_distance(hash_hex, th) for th in target_hashes)
-

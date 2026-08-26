@@ -20,14 +20,15 @@ from pathlib import Path
 from PIL import Image
 
 from twin.core.config import settings
-from twin.services.embedding import compute_embedding, is_text_supported
+from twin.services.embedding import compute_embedding
 from twin.services.hasher import (
-    compute_ahash,
     compute_dhash,
     compute_phash,
     compute_rotated_dhashes,
+    compute_rotated_phashes,
     compute_ssim,
     hamming_distance,
+    rotate_image,
 )
 from twin.services.indexer import indexer
 from twin.utils.image import load_image
@@ -174,17 +175,19 @@ def search(
         meta = indexer.get_metadata(idx)
         if meta is None:
             continue
-        candidates.append({
-            "id": idx,
-            "filename": meta.get("filename", "unknown"),
-            "distance": round(float(dist), 6),
-            "meta": meta,
-            # metrics filled in as we go
-            "dhash_distance": 999,
-            "phash_distance": 999,
-            "ssim_score": 0.0,
-            "stages_passed": 0,
-        })
+        candidates.append(
+            {
+                "id": idx,
+                "filename": meta.get("filename", "unknown"),
+                "distance": round(float(dist), 6),
+                "meta": meta,
+                # metrics filled in as we go
+                "dhash_distance": 999,
+                "phash_distance": 999,
+                "ssim_score": 0.0,
+                "stages_passed": 0,
+            }
+        )
 
     if not candidates:
         return _empty(t0, stages)
@@ -199,19 +202,35 @@ def search(
         cand_dhash = c["meta"].get("dhash", "")
         if not cand_dhash:
             c["dhash_distance"] = 999
+            c["_candidate_rotations"] = [0]
+            c["_best_rotation"] = 0
             continue
 
         if rotation_invariant:
-            dist = min(hamming_distance(qh, cand_dhash) for qh in query_dhashes)
+            distances_per_angle = [hamming_distance(qh, cand_dhash) for qh in query_dhashes]
+            min_dist = min(distances_per_angle)
+            c["dhash_distance"] = min_dist
+            if min_dist <= dhash_threshold:
+                c["_candidate_rotations"] = [
+                    i for i, d in enumerate(distances_per_angle) if d <= dhash_threshold
+                ]
+                c["_best_rotation"] = distances_per_angle.index(min_dist)
+                c["stages_passed"] += 1
+                dhash_survivors.append(c)
         else:
             dist = hamming_distance(query_dhash, cand_dhash)
-
-        c["dhash_distance"] = dist
-        if dist <= dhash_threshold:
-            c["stages_passed"] += 1
-            dhash_survivors.append(c)
+            c["dhash_distance"] = dist
+            c["_candidate_rotations"] = [0]
+            c["_best_rotation"] = 0
+            if dist <= dhash_threshold:
+                c["stages_passed"] += 1
+                dhash_survivors.append(c)
     t2 = time.perf_counter()
-    stages["dhash"] = {"in": len(candidates), "out": len(dhash_survivors), "elapsed_ms": round((t2 - t1) * 1000, 3)}
+    stages["dhash"] = {
+        "in": len(candidates),
+        "out": len(dhash_survivors),
+        "elapsed_ms": round((t2 - t1) * 1000, 3),
+    }
 
     if not dhash_survivors:
         # No dHash survivors — everything goes to "none" tier
@@ -222,16 +241,39 @@ def search(
     # ==================================================================
     # Stage 3: pHash filter (runs on dHash survivors)
     # ==================================================================
+    query_phashes = compute_rotated_phashes(image) if rotation_invariant else [query_phash]
+
     phash_survivors = []
     for c in dhash_survivors:
         cand_phash = c["meta"].get("phash", "")
-        ok, dist = _passes_hash(query_phash, cand_phash, phash_threshold)
-        c["phash_distance"] = dist
-        if ok:
-            c["stages_passed"] += 1
-            phash_survivors.append(c)
+        if not cand_phash:
+            c["phash_distance"] = 999
+            continue
+
+        if rotation_invariant:
+            candidate_rots = c.get("_candidate_rotations", [0])
+            phash_evals = [
+                (rot_i, hamming_distance(query_phashes[rot_i], cand_phash))
+                for rot_i in candidate_rots
+            ]
+            best_rot, best_p_dist = min(phash_evals, key=lambda x: x[1])
+            c["phash_distance"] = best_p_dist
+            c["_best_rotation"] = best_rot  # pHash disambiguates the exact rotation angle
+            if best_p_dist <= phash_threshold:
+                c["stages_passed"] += 1
+                phash_survivors.append(c)
+        else:
+            ok, dist = _passes_hash(query_phash, cand_phash, phash_threshold)
+            c["phash_distance"] = dist
+            if ok:
+                c["stages_passed"] += 1
+                phash_survivors.append(c)
     t3 = time.perf_counter()
-    stages["phash"] = {"in": len(dhash_survivors), "out": len(phash_survivors), "elapsed_ms": round((t3 - t2) * 1000, 3)}
+    stages["phash"] = {
+        "in": len(dhash_survivors),
+        "out": len(phash_survivors),
+        "elapsed_ms": round((t3 - t2) * 1000, 3),
+    }
 
     if not phash_survivors:
         # dHash passed but pHash failed — "suspected" tier
@@ -244,7 +286,11 @@ def search(
     # ==================================================================
     def _ssim_check(c: dict) -> dict:
         cpath = c["meta"].get("path", "")
-        ok, score = _passes_ssim(image, cpath, ssim_threshold)
+        rot_idx = c.get("_best_rotation", 0)
+        query_candidate_img = (
+            rotate_image(image, rot_idx) if (rotation_invariant and rot_idx) else image
+        )
+        ok, score = _passes_ssim(query_candidate_img, cpath, ssim_threshold)
         c["ssim_score"] = round(score, 4)
         if ok:
             c["stages_passed"] += 1
@@ -255,7 +301,11 @@ def search(
 
     confirmed = [c for c in checked if c["stages_passed"] >= 3]  # Faiss+dHash+pHash+SSIM
     t4 = time.perf_counter()
-    stages["ssim"] = {"in": len(phash_survivors), "out": len(confirmed), "elapsed_ms": round((t4 - t3) * 1000, 3)}
+    stages["ssim"] = {
+        "in": len(phash_survivors),
+        "out": len(confirmed),
+        "elapsed_ms": round((t4 - t3) * 1000, 3),
+    }
 
     # Merge survivors back into full candidate list for ranking
     finalized = {c["id"]: c for c in candidates}
@@ -269,8 +319,10 @@ def search(
     logger.info(
         "Search in %.0fms: %d candidates → %d dHash → %d pHash → %d confirmed",
         elapsed * 1000,
-        len(candidates), len(dhash_survivors),
-        len(phash_survivors), len(confirmed),
+        len(candidates),
+        len(dhash_survivors),
+        len(phash_survivors),
+        len(confirmed),
     )
 
     return _build_response(final_list, stages, t0)
@@ -313,14 +365,16 @@ def search_by_text(
         meta = indexer.get_metadata(idx)
         if meta is None:
             continue
-        results.append({
-            "id": idx,
-            "filename": meta.get("filename", "unknown"),
-            "distance": round(float(dist), 6),
-            "path": meta.get("path", ""),
-            "dhash_hex": meta.get("dhash", ""),
-            "phash_hex": meta.get("phash", ""),
-        })
+        results.append(
+            {
+                "id": idx,
+                "filename": meta.get("filename", "unknown"),
+                "distance": round(float(dist), 6),
+                "path": meta.get("path", ""),
+                "dhash_hex": meta.get("dhash", ""),
+                "phash_hex": meta.get("phash", ""),
+            }
+        )
 
     return {
         "results": results,
@@ -328,5 +382,3 @@ def search_by_text(
         "query_time_ms": round(elapsed * 1000, 3),
         "query": query,
     }
-
-

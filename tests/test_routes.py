@@ -17,6 +17,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def client():
     """Session-scoped TestClient — model loads once."""
     from twin.core.config import settings
+
     if settings.images_path.exists():
         for p in settings.images_path.iterdir():
             if p.is_file():
@@ -32,6 +33,7 @@ def client():
 def _clear_index():
     """Reset index state and images directory between tests."""
     from twin.core.config import settings
+
     indexer.clear()
     if settings.images_path.exists():
         for p in settings.images_path.iterdir():
@@ -186,6 +188,7 @@ def test_text_search_endpoint(client):
 def test_async_batch_index_endpoint(client, tmp_path):
     """POST /index/batch with async_mode=True returns task_id and tracking status."""
     import time
+
     # Copy fixture image to tmp dir
     img = Image.open(FIXTURES / "red.png")
     img.save(tmp_path / "test_async_red.png")
@@ -215,8 +218,9 @@ def test_async_batch_index_endpoint(client, tmp_path):
 
 def test_text_search_dinov2_guard_returns_400(client, monkeypatch):
     """POST /search/text returns 400 when active model is vision-only (DINOv2)."""
-    from twin.core.config import settings
-    monkeypatch.setattr(settings, "model_type", "dinov2")
+    import twin.services.embedding as emb
+
+    monkeypatch.setattr(emb, "_active_model_type", "dinov2")
 
     resp = client.post(
         "/api/v1/search/text",
@@ -224,4 +228,3 @@ def test_text_search_dinov2_guard_returns_400(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "vision-only" in resp.json()["detail"]
-

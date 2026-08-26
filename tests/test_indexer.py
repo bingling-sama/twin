@@ -1,13 +1,11 @@
 """Tests for Faiss indexer."""
 
-import json
-import threading
 import tempfile
-from pathlib import Path
+import threading
 
 import numpy as np
-
 import pytest
+
 from twin.core.config import Settings, settings
 from twin.services.indexer import Indexer
 
@@ -512,9 +510,9 @@ def test_ivfpq_add_and_search(monkeypatch):
         s = Settings(
             index_path=tmpdir,
             faiss_index_type="ivf_pq",
-            faiss_nlist=4,        # small nlist → IVF training needs 4*39=156
-            faiss_pq_m=16,        # 32-dimensional sub-vectors
-            faiss_pq_nbits=3,     # 2^3=8 centroids/sub-space
+            faiss_nlist=4,  # small nlist → IVF training needs 4*39=156
+            faiss_pq_m=16,  # 32-dimensional sub-vectors
+            faiss_pq_nbits=3,  # 2^3=8 centroids/sub-space
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
 
@@ -557,9 +555,9 @@ def test_ivfpq_train_from_flat(monkeypatch):
         s = Settings(
             index_path=tmpdir,
             faiss_index_type="ivf_pq",
-            faiss_nlist=4,        # small nlist → training needs 4*39=156 vectors
-            faiss_pq_m=16,        # 32-dimensional sub-vectors
-            faiss_pq_nbits=3,     # 2^3=8 centroids/sub-space
+            faiss_nlist=4,  # small nlist → training needs 4*39=156 vectors
+            faiss_pq_m=16,  # 32-dimensional sub-vectors
+            faiss_pq_nbits=3,  # 2^3=8 centroids/sub-space
             faiss_auto_upgrade=False,  # disable so we test explicit train_index
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
@@ -595,9 +593,9 @@ def test_ivfpq_save_load_roundtrip(monkeypatch):
         s = Settings(
             index_path=tmpdir,
             faiss_index_type="ivf_pq",
-            faiss_nlist=4,        # small nlist → training needs 4*39=156 vectors
-            faiss_pq_m=16,        # 32-dimensional sub-vectors
-            faiss_pq_nbits=3,     # 2^3=8 centroids/sub-space
+            faiss_nlist=4,  # small nlist → training needs 4*39=156 vectors
+            faiss_pq_m=16,  # 32-dimensional sub-vectors
+            faiss_pq_nbits=3,  # 2^3=8 centroids/sub-space
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
 
@@ -610,7 +608,7 @@ def test_ivfpq_save_load_roundtrip(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx1._index.add(vectors[i:i + 1])
+            idx1._index.add(vectors[i : i + 1])
             idx1._metadata.append({"filename": f"pq_{i}.png"})
 
         idx1.train_index()
@@ -644,9 +642,9 @@ def test_ivfpq_already_trained_is_skipped(monkeypatch):
         s = Settings(
             index_path=tmpdir,
             faiss_index_type="ivf_pq",
-            faiss_nlist=4,        # small nlist → training needs 4*39=156 vectors
-            faiss_pq_m=16,        # 32-dimensional sub-vectors
-            faiss_pq_nbits=3,     # 2^3=8 centroids/sub-space
+            faiss_nlist=4,  # small nlist → training needs 4*39=156 vectors
+            faiss_pq_m=16,  # 32-dimensional sub-vectors
+            faiss_pq_nbits=3,  # 2^3=8 centroids/sub-space
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
 
@@ -658,7 +656,7 @@ def test_ivfpq_already_trained_is_skipped(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"pq_{i}.png"})
 
         # First train
@@ -692,7 +690,7 @@ def test_ivfpq_upgrade_from_ivfflat(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"img_{i}.png"})
 
         # Train Flat → IVFFlat first (simulating what happens when target was ivf_flat)
@@ -765,14 +763,14 @@ def test_resolve_pq_m(monkeypatch):
     idx = Indexer()
 
     # Default: dim // 8
-    assert idx._resolve_pq_m(512) == 64   # 512 // 8
-    assert idx._resolve_pq_m(768) == 96   # 768 // 8
+    assert idx._resolve_pq_m(512) == 64  # 512 // 8
+    assert idx._resolve_pq_m(768) == 96  # 768 // 8
 
     # Explicit override
     s = Settings(faiss_pq_m=32)
     monkeypatch.setattr("twin.services.indexer.settings", s)
     assert idx._resolve_pq_m(512) == 32
-    assert idx._resolve_pq_m(768) == 32   # override always wins
+    assert idx._resolve_pq_m(768) == 32  # override always wins
 
 
 def test_ivfpq_batch_add(monkeypatch):
@@ -781,9 +779,9 @@ def test_ivfpq_batch_add(monkeypatch):
         s = Settings(
             index_path=tmpdir,
             faiss_index_type="ivf_pq",
-            faiss_nlist=4,        # small nlist → training needs 4*39=156 vectors
-            faiss_pq_m=16,        # 32-dimensional sub-vectors
-            faiss_pq_nbits=3,     # 2^3=8 centroids/sub-space
+            faiss_nlist=4,  # small nlist → training needs 4*39=156 vectors
+            faiss_pq_m=16,  # 32-dimensional sub-vectors
+            faiss_pq_nbits=3,  # 2^3=8 centroids/sub-space
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
 
@@ -796,7 +794,7 @@ def test_ivfpq_batch_add(monkeypatch):
         rng = np.random.RandomState(42)
         train_vecs = rng.randn(n_train, 512).astype(np.float32)
         for i in range(n_train):
-            idx._index.add(train_vecs[i:i + 1])
+            idx._index.add(train_vecs[i : i + 1])
             idx._metadata.append({"filename": f"train_{i}.png"})
         result = idx.train_index()
         assert result["status"] == "trained"
@@ -821,9 +819,9 @@ def test_ivfpq_search_distances_are_l2(monkeypatch):
         s = Settings(
             index_path=tmpdir,
             faiss_index_type="ivf_pq",
-            faiss_nlist=4,        # small nlist → training needs 4*39=156 vectors
-            faiss_pq_m=16,        # 32-dimensional sub-vectors
-            faiss_pq_nbits=3,     # 2^3=8 centroids/sub-space
+            faiss_nlist=4,  # small nlist → training needs 4*39=156 vectors
+            faiss_pq_m=16,  # 32-dimensional sub-vectors
+            faiss_pq_nbits=3,  # 2^3=8 centroids/sub-space
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
 
@@ -835,7 +833,7 @@ def test_ivfpq_search_distances_are_l2(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"d_{i}.png"})
         result = idx.train_index()
         assert result["status"] == "trained"
@@ -865,7 +863,7 @@ def test_rebuild_preserves_data_flat_to_hnsw(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"img_{i}.png"})
 
         orig_count = idx.count
@@ -925,7 +923,7 @@ def test_rebuild_flat_to_ivf_with_auto_train(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"img_{i}.png"})
 
         # Rebuild: flat → ivf_flat (should auto-train)
@@ -958,7 +956,7 @@ def test_rebuild_fast_switch_uses_cache(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"img_{i}.png"})
 
         # Switch flat → hnsw (slow path — builds from scratch)
@@ -1005,7 +1003,7 @@ def test_rebuild_detects_stale_cache_by_count(monkeypatch):
         rng = np.random.RandomState(42)
         vectors = rng.randn(n, 512).astype(np.float32)
         for i in range(n):
-            idx._index.add(vectors[i:i + 1])
+            idx._index.add(vectors[i : i + 1])
             idx._metadata.append({"filename": f"img_{i}.png"})
 
         # Build and cache hnsw (saves .count = 200)

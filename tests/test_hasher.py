@@ -215,4 +215,3 @@ def test_compute_ssim_torch_cpu_and_gpu():
     # Test via top-level compute_ssim dispatch
     assert compute_ssim(red1, red2, use_gpu=False) >= 0.99
     assert compute_ssim(red1, red2, use_gpu=True) >= 0.99
-

@@ -63,7 +63,11 @@ def load(
     _model = _model.to(_device)
     _model.eval()
 
-    if hasattr(_model, "visual") and hasattr(_model.visual, "output_dim") and _model.visual.output_dim:
+    if (
+        hasattr(_model, "visual")
+        and hasattr(_model.visual, "output_dim")
+        and _model.visual.output_dim
+    ):
         _dim = int(_model.visual.output_dim)
     elif hasattr(_model, "text_projection") and _model.text_projection is not None:
         _dim = int(_model.text_projection.shape[-1])
@@ -149,6 +153,7 @@ def encode_text(text: str) -> "torch.Tensor":
     global _tokenizer
     if _tokenizer is None:
         import open_clip
+
         _tokenizer = open_clip.get_tokenizer(_model_name or "ViT-B-32")
 
     tokens = _tokenizer([text]).to(_device)
@@ -169,6 +174,7 @@ def encode_texts(texts: list[str]) -> "torch.Tensor":
     global _tokenizer
     if _tokenizer is None:
         import open_clip
+
         _tokenizer = open_clip.get_tokenizer(_model_name or "ViT-B-32")
 
     tokens = _tokenizer(texts).to(_device)

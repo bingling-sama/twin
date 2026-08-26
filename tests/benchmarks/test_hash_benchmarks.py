@@ -10,7 +10,6 @@ import pytest
 
 from twin.services.hasher import compute_dhash, compute_dhashes, compute_phash, compute_phashes
 
-
 # ── dHash benchmarks ──────────────────────────────────────────────────────────
 
 

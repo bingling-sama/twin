@@ -36,10 +36,12 @@ def test_load_image_corrupt_file():
 
 def test_load_images_mixed():
     """load_images separates valid and invalid paths."""
-    imgs, ok, failed = load_images([
-        FIXTURES / "red.png",
-        Path("/tmp/does_not_exist_xyz.png"),
-    ])
+    imgs, ok, failed = load_images(
+        [
+            FIXTURES / "red.png",
+            Path("/tmp/does_not_exist_xyz.png"),
+        ]
+    )
     assert len(imgs) == 1
     assert len(ok) == 1
     assert len(failed) == 1

@@ -30,6 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("twin")
 
+
 def _run_sync_background() -> None:
     """Run sync_images_dir in a background thread so the server is ready immediately.
 
@@ -40,8 +41,10 @@ def _run_sync_background() -> None:
         result = sync_images_dir()
         logger.info(
             "Background sync finished: %d total, %d indexed, %d skipped, %d failed",
-            result["total"], result["indexed"],
-            result["skipped"], result["failed"],
+            result["total"],
+            result["indexed"],
+            result["skipped"],
+            result["failed"],
         )
     except Exception:
         logger.exception("Background sync failed")
@@ -65,19 +68,20 @@ async def lifespan(app: FastAPI):
         sync_result = sync_images_dir()
         logger.info(
             "Sync result: %d total, %d indexed, %d skipped, %d failed",
-            sync_result["total"], sync_result["indexed"],
-            sync_result["skipped"], sync_result["failed"],
+            sync_result["total"],
+            sync_result["indexed"],
+            sync_result["skipped"],
+            sync_result["failed"],
         )
     else:
         # Launch background sync so server is responsive immediately
         logger.info("Starting background sync (use TWIN_SYNC_ON_STARTUP=true to block)")
-        threading.Thread(
-            target=_run_sync_background, name="twin-sync", daemon=True
-        ).start()
+        threading.Thread(target=_run_sync_background, name="twin-sync", daemon=True).start()
 
     logger.info(
         "=== Twin ready (indexed: %d, index: %s) ===",
-        indexer.count, indexer.index_type_name,
+        indexer.count,
+        indexer.index_type_name,
     )
     yield
     logger.info("=== Twin shutting down ===")

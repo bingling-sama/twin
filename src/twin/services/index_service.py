@@ -24,6 +24,7 @@ from twin.services.hasher import (
 )
 from twin.services.indexer import indexer
 from twin.utils.image import IMAGE_EXTENSIONS, load_images
+from twin.utils.metrics import compute_progress_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,7 @@ def _prune_tasks_locked() -> None:
     """Evict oldest finished tasks if _tasks exceeds MAX_TASKS."""
     if len(_tasks) <= MAX_TASKS:
         return
-    removable = [
-        tid for tid, t in _tasks.items()
-        if t.get("status") in ("completed", "failed")
-    ]
+    removable = [tid for tid, t in _tasks.items() if t.get("status") in ("completed", "failed")]
     for tid in removable:
         if len(_tasks) <= MAX_TASKS:
             break
@@ -58,38 +56,23 @@ def get_task_status(task_id: str) -> dict | None:
         res = dict(task)
         samples = list(task.get("_processed_samples", []))
 
-    if res["status"] in ("running", "started") and res.get("started_at") is not None and res.get("total", 0) > 0:
-        now = time.perf_counter()
+    if (
+        res["status"] in ("running", "started")
+        and res.get("started_at") is not None
+        and res.get("total", 0) > 0
+    ):
         processed = res.get("indexed", 0) + res.get("failed", 0)
-        elapsed_ms = (now - res["started_at"]) * 1000
-        res["time_ms"] = round(elapsed_ms, 2)
-        res["elapsed_ms"] = round(elapsed_ms, 2)
-
-        # Recent rate (last 5s rolling window)
-        if samples:
-            cutoff = now - 5.0
-            recent = [(t, w) for t, w in samples if t >= cutoff]
-            if len(recent) >= 2 and recent[-1][1] > recent[0][1]:
-                dw = recent[-1][1] - recent[0][1]
-                dt = recent[-1][0] - recent[0][0]
-                res["rate_img_per_s"] = round(dw / dt, 1) if dt > 0 else 0.0
-            elif processed > 0:
-                res["rate_img_per_s"] = round(processed / max(elapsed_ms / 1000, 0.001), 1)
-            else:
-                res["rate_img_per_s"] = 0.0
-        elif processed > 0:
-            res["rate_img_per_s"] = round(processed / max(elapsed_ms / 1000, 0.001), 1)
-        else:
-            res["rate_img_per_s"] = 0.0
-
-        # ETA uses cumulative rate
-        if processed > 0:
-            cum_rate = processed / max(elapsed_ms / 1000, 0.001)
-            remaining = res["total"] - processed
-            res["eta_ms"] = (remaining / cum_rate) * 1000 if cum_rate > 0 else 0
-        else:
-            res["eta_ms"] = 0
-        res["progress_pct"] = round(processed * 100 / max(res["total"], 1), 1)
+        metrics = compute_progress_metrics(
+            processed=processed,
+            total=res["total"],
+            started_at=res["started_at"],
+            samples=samples,
+        )
+        res["time_ms"] = metrics["elapsed_ms"]
+        res["elapsed_ms"] = metrics["elapsed_ms"]
+        res["rate_img_per_s"] = metrics["rate_img_per_s"]
+        res["eta_ms"] = metrics["eta_ms"]
+        res["progress_pct"] = metrics["progress_pct"]
     else:
         res.setdefault("rate_img_per_s", 0.0)
         res.setdefault("eta_ms", 0.0)
@@ -198,6 +181,7 @@ def index_batch_async(directory: str | Path) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def index_single(image: Image.Image, filename: str, content: bytes) -> dict:
     """
     Index a single image uploaded via the API.
@@ -240,8 +224,7 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
         raise ValueError(f"Not a directory: {directory}")
 
     image_files = sorted(
-        p for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+        p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     )
 
     if not image_files:
@@ -298,7 +281,9 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
 
             except Exception:
                 logger.warning(
-                    "Batch failed at offset %d, falling back to individual", i, exc_info=True,
+                    "Batch failed at offset %d, falling back to individual",
+                    i,
+                    exc_info=True,
                 )
                 for path, img in zip(ok_paths, imgs):
                     try:
@@ -330,7 +315,9 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
     elapsed = time.perf_counter() - t0
     logger.info(
         "Batch index done: %d indexed, %d failed in %.0fms",
-        indexed, failed, elapsed * 1000,
+        indexed,
+        failed,
+        elapsed * 1000,
     )
 
     if indexed > 0:
@@ -352,6 +339,7 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _index_single_from_disk(image: Image.Image, path: Path) -> int:
     """Index a single image that's already on disk. Returns assigned ID."""

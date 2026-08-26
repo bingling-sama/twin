@@ -62,3 +62,48 @@ def test_rotation_invariant_search_90_180_270():
     item_270 = res_270["results"][0]
     assert item_270["filename"] == "red.png"
     assert item_270["dhash_distance"] == 0
+
+
+def test_asymmetric_image_rotation_full_funnel(tmp_path):
+    """Asymmetric image rotated by 90° passes all 4 stages to reach 'confirmed' status."""
+    import numpy as np
+
+    from twin.services.embedding import compute_embedding
+
+    # Create asymmetric test image (gradient + pattern)
+    arr = np.zeros((100, 100, 3), dtype=np.uint8)
+    arr[:50, :50] = [255, 0, 0]  # Top-left red
+    arr[50:, :50] = [0, 255, 0]  # Bottom-left green
+    arr[:50, 50:] = [0, 0, 255]  # Top-right blue
+    arr[50:, 50:] = [255, 255, 0]  # Bottom-right yellow
+    img = Image.fromarray(arr, mode="RGB")
+
+    saved_path = tmp_path / "asym.png"
+    img.save(saved_path)
+
+    vec = compute_embedding(img)
+    meta = {
+        "filename": "asym.png",
+        "path": str(saved_path),
+        "dhash": compute_dhash(img),
+        "phash": compute_phash(img),
+    }
+    indexer.add_item(vec, meta)
+
+    # 90° clockwise rotation
+    rot_90 = img.transpose(Image.Transpose.ROTATE_90)
+
+    # Without rotation invariance: pHash and SSIM fail because shapes are unaligned
+    res_strict = search(rot_90, rotation_invariant=False)
+    assert res_strict["count"] == 1
+    assert res_strict["results"][0]["match_level"] != "confirmed"
+
+    # With rotation invariance: Stage 2 detects 90° rotation, Stage 3 and Stage 4 evaluate at 90°
+    res_rot = search(rot_90, rotation_invariant=True)
+    assert res_rot["count"] == 1
+    item = res_rot["results"][0]
+    assert item["match_level"] == "confirmed"
+    assert item["stages_passed"] == 3
+    assert item["dhash_distance"] == 0
+    assert item["phash_distance"] == 0
+    assert item["ssim_score"] >= 0.95

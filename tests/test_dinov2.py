@@ -1,7 +1,7 @@
-import pytest
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from twin.core.config import settings
@@ -45,11 +45,15 @@ def test_dinov2_model_load_and_encode():
 
 def test_dinov2_service_dispatch(monkeypatch):
     """Embedding service delegates to DINOv2 when model_type is configured."""
-    from twin.services.embedding import get_embedding_dim, is_text_supported, load_model
+    from twin.services.embedding import (
+        get_active_model_type,
+        get_embedding_dim,
+        is_text_supported,
+        load_model,
+    )
 
     load_model(device="cpu", model_name="vit_small_patch14_dinov2")
-    assert settings.model_type == "dinov2"
-    assert settings.embedding_dim == 384
+    assert get_active_model_type() == "dinov2"
     assert get_embedding_dim() == 384
     assert is_text_supported() is False
 
@@ -68,6 +72,7 @@ def test_dinov2_service_dispatch(monkeypatch):
 def test_dinov2_text_search_rejected():
     """Text search raises ValueError on vision-only DINOv2 model."""
     import pytest
+
     from twin.services.embedding import compute_text_embedding, load_model
 
     load_model(device="cpu", model_name="vit_small_patch14_dinov2")

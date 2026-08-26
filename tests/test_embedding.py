@@ -118,4 +118,3 @@ def test_batch_text_embeddings():
     vecs = compute_text_embeddings(texts)
     assert vecs.shape == (2, 512)
     assert vecs.dtype == np.float32
-

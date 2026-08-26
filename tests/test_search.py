@@ -153,6 +153,7 @@ def test_final_sort():
 # ---------------------------------------------------------------------------
 def test_empty_response():
     import time
+
     t0 = time.perf_counter()
     stages = {"faiss": {"in": 0}}
     result = _empty(t0, stages)
@@ -164,6 +165,7 @@ def test_empty_response():
 
 def test_build_response():
     import time
+
     t0 = time.perf_counter()
     stages = {"faiss": {"in": 1, "out": 1, "elapsed_ms": 5.0}}
     results = [
@@ -210,12 +212,15 @@ def test_search_explicit_params():
     from twin.services.hasher import compute_dhash, compute_phash
 
     v = compute_embedding(img)
-    indexer.add_item(v, {
-        "filename": "red.png",
-        "path": str(FIXTURES / "red.png"),
-        "dhash": compute_dhash(img),
-        "phash": compute_phash(img),
-    })
+    indexer.add_item(
+        v,
+        {
+            "filename": "red.png",
+            "path": str(FIXTURES / "red.png"),
+            "dhash": compute_dhash(img),
+            "phash": compute_phash(img),
+        },
+    )
 
     # Search with custom params
     result = search(img, top_k=10, dhash_threshold=5, phash_threshold=5, ssim_threshold=0.80)

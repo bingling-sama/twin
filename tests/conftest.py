@@ -23,4 +23,5 @@ def pytest_unconfigure(config):
     tmpdir = getattr(config, "_twin_test_images_dir", None)
     if tmpdir and os.path.isdir(tmpdir):
         import shutil
+
         shutil.rmtree(tmpdir, ignore_errors=True)

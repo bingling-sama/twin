@@ -11,6 +11,10 @@ from twin.models import clip_model, dinov2_model
 
 logger = logging.getLogger(__name__)
 
+# Module-level runtime state (preserves settings immutability)
+_active_model_type: str = settings.model_type
+_active_embedding_dim: int = settings.embedding_dim
+
 
 def load_model(
     device: str | None = None,
@@ -21,8 +25,10 @@ def load_model(
 
     Automatically routes to DINOv2 if model_name contains 'dinov2' or
     settings.model_type == 'dinov2', otherwise loads OpenCLIP.
-    Dynamically sets settings.embedding_dim and settings.model_type.
+    Updates active runtime state without mutating the global settings object.
     """
+    global _active_model_type, _active_embedding_dim
+
     target_name = model_name or settings.model_name
     target_device = device or (settings.device or None)
     target_pretrained = pretrained or settings.pretrained
@@ -30,61 +36,70 @@ def load_model(
     if "dinov2" in target_name.lower() or settings.model_type == "dinov2":
         logger.info("Routing to DINOv2 model: %s", target_name)
         dinov2_model.load(device=target_device, model_name=target_name)
-        settings.model_type = "dinov2"
-        settings.embedding_dim = dinov2_model.get_embedding_dim()
+        _active_model_type = "dinov2"
+        _active_embedding_dim = dinov2_model.get_embedding_dim()
         logger.info(
             "Active model set to DINOv2 (%s, dim=%d)",
-            target_name, settings.embedding_dim,
+            target_name,
+            _active_embedding_dim,
         )
     else:
         logger.info("Routing to OpenCLIP model: %s (%s)", target_name, target_pretrained)
         clip_model.load(device=target_device, model_name=target_name, pretrained=target_pretrained)
-        settings.model_type = "clip"
-        settings.embedding_dim = clip_model.get_embedding_dim()
+        _active_model_type = "clip"
+        _active_embedding_dim = clip_model.get_embedding_dim()
         logger.info(
             "Active model set to CLIP (%s, dim=%d)",
-            target_name, settings.embedding_dim,
+            target_name,
+            _active_embedding_dim,
         )
+
+
+def get_active_model_type() -> str:
+    """Return runtime active model type ('clip' | 'dinov2')."""
+    return _active_model_type
 
 
 def is_loaded() -> bool:
     """Check if the active model singleton is loaded."""
-    if settings.model_type == "dinov2":
+    if _active_model_type == "dinov2":
         return dinov2_model.is_loaded()
     return clip_model.is_loaded()
 
 
 def get_device() -> str:
     """Return device string ('cuda', 'mps', 'cpu') for active model."""
-    if settings.model_type == "dinov2":
+    if _active_model_type == "dinov2":
         return dinov2_model.get_device()
     return clip_model.get_device()
 
 
 def get_model_name() -> str:
     """Return active model variant name."""
-    if settings.model_type == "dinov2":
+    if _active_model_type == "dinov2":
         return dinov2_model.get_model_name()
     return clip_model.get_model_name()
 
 
 def get_gpu_name() -> str:
     """Return active model GPU name if on CUDA."""
-    if settings.model_type == "dinov2":
+    if _active_model_type == "dinov2":
         return dinov2_model.get_gpu_name()
     return clip_model.get_gpu_name()
 
 
 def get_embedding_dim() -> int:
     """Return active embedding dimension."""
-    if settings.model_type == "dinov2":
-        return dinov2_model.get_embedding_dim()
-    return clip_model.get_embedding_dim()
+    if _active_model_type == "dinov2":
+        return (
+            dinov2_model.get_embedding_dim() if dinov2_model.is_loaded() else _active_embedding_dim
+        )
+    return clip_model.get_embedding_dim() if clip_model.is_loaded() else _active_embedding_dim
 
 
 def is_text_supported() -> bool:
     """Return True if active model supports natural language text search."""
-    return settings.model_type != "dinov2"
+    return _active_model_type != "dinov2"
 
 
 def compute_embedding(image: Image.Image) -> np.ndarray:
@@ -94,7 +109,7 @@ def compute_embedding(image: Image.Image) -> np.ndarray:
     The image should already be RGB.
     """
     start = time.perf_counter()
-    if settings.model_type == "dinov2":
+    if _active_model_type == "dinov2":
         features = dinov2_model.encode_image(image)
     else:
         features = clip_model.encode_image(image)
@@ -115,7 +130,7 @@ def compute_embeddings(images: list[Image.Image]) -> np.ndarray:
         return np.empty((0, dim), dtype=np.float32)
 
     start = time.perf_counter()
-    if settings.model_type == "dinov2":
+    if _active_model_type == "dinov2":
         features = dinov2_model.encode_images(images)
     else:
         features = clip_model.encode_images(images)
@@ -123,7 +138,9 @@ def compute_embeddings(images: list[Image.Image]) -> np.ndarray:
     elapsed = time.perf_counter() - start
     logger.debug(
         "Batch embedding: %d images in %.0fms (%.0fms/img)",
-        len(images), elapsed * 1000, elapsed * 1000 / len(images),
+        len(images),
+        elapsed * 1000,
+        elapsed * 1000 / len(images),
     )
     return vectors
 
@@ -135,9 +152,10 @@ def compute_text_embedding(text: str) -> np.ndarray:
     Raises ValueError if active model does not support text search (e.g. DINOv2).
     """
     if not is_text_supported():
+        model_display = get_model_name() or settings.model_name
         raise ValueError(
-            f"Current model '{get_model_name() or settings.model_name}' (DINOv2) is vision-only "
-            "and does not support natural language text search. Use CLIP (e.g. ViT-B-32) for text search."
+            f"Current model '{model_display}' (DINOv2) is vision-only "
+            "and does not support text search. Use CLIP (e.g. ViT-B-32)."
         )
 
     start = time.perf_counter()
@@ -155,9 +173,10 @@ def compute_text_embeddings(texts: list[str]) -> np.ndarray:
     Raises ValueError if active model does not support text search (e.g. DINOv2).
     """
     if not is_text_supported():
+        model_display = get_model_name() or settings.model_name
         raise ValueError(
-            f"Current model '{get_model_name() or settings.model_name}' (DINOv2) is vision-only "
-            "and does not support natural language text search. Use CLIP (e.g. ViT-B-32) for text search."
+            f"Current model '{model_display}' (DINOv2) is vision-only "
+            "and does not support text search. Use CLIP (e.g. ViT-B-32)."
         )
 
     dim = get_embedding_dim()
@@ -170,6 +189,7 @@ def compute_text_embeddings(texts: list[str]) -> np.ndarray:
     elapsed = time.perf_counter() - start
     logger.debug(
         "Batch text embedding: %d texts in %.0fms",
-        len(texts), elapsed * 1000,
+        len(texts),
+        elapsed * 1000,
     )
     return vectors

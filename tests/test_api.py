@@ -34,17 +34,13 @@ def _clear_index():
 def _upload(client: TestClient, path: Path):
     """Helper: upload a fixture image for indexing."""
     with open(path, "rb") as f:
-        return client.post(
-            "/api/v1/index", files={"file": (path.name, f, "image/png")}
-        )
+        return client.post("/api/v1/index", files={"file": (path.name, f, "image/png")})
 
 
 def _search(client: TestClient, path: Path):
     """Helper: search with a fixture image."""
     with open(path, "rb") as f:
-        return client.post(
-            "/api/v1/search", files={"file": (path.name, f, "image/png")}
-        )
+        return client.post("/api/v1/search", files={"file": (path.name, f, "image/png")})
 
 
 # ---------------------------------------------------------------------------

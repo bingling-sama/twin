@@ -155,8 +155,9 @@ def temp_image_dir() -> Path:
     from tests.benchmarks.fixtures.synthetic import save_images_to_dir
 
     tmp = Path(tempfile.mkdtemp(prefix="twin_bench_io_"))
-    save_images_to_dir(tmp, count=20, sizes=[(224, 224), (512, 512), (1024, 1024)],
-                       formats=["png", "jpg"])
+    save_images_to_dir(
+        tmp, count=20, sizes=[(224, 224), (512, 512), (1024, 1024)], formats=["png", "jpg"]
+    )
     yield tmp
     shutil.rmtree(tmp, ignore_errors=True)
 
@@ -167,6 +168,7 @@ def temp_image_dir() -> Path:
 def _make_flat_index(dim: int = 512) -> "faiss.IndexFlatL2":
     """Create a bare IndexFlatL2 — no lock, no metadata, no disk I/O."""
     import faiss
+
     return faiss.IndexFlatL2(dim)
 
 
@@ -366,9 +368,7 @@ def _collect_gpu_info() -> dict | None:
             info["vram_total_mb"] = round(
                 torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)
             )
-            info["compute_capability"] = "{}.{}".format(
-                *torch.cuda.get_device_capability(0)
-            )
+            info["compute_capability"] = "{}.{}".format(*torch.cuda.get_device_capability(0))
             info["cuda_version"] = torch.version.cuda or "unknown"
             info["torch_version"] = torch.__version__
         else:
@@ -385,7 +385,9 @@ def _collect_gpu_info() -> dict | None:
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0:
                 info["driver_version"] = result.stdout.strip()
@@ -421,8 +423,15 @@ def _collect_os_info() -> dict:
 def _collect_package_versions() -> dict:
     """Collect versions of key Python packages."""
     packages = [
-        "torch", "faiss", "numpy", "PIL", "open_clip",
-        "imagehash", "skimage", "fastapi", "uvicorn",
+        "torch",
+        "faiss",
+        "numpy",
+        "PIL",
+        "open_clip",
+        "imagehash",
+        "skimage",
+        "fastapi",
+        "uvicorn",
     ]
     versions: dict = {}
     for pkg in packages:
@@ -442,6 +451,7 @@ def _collect_package_versions() -> dict:
     if "faiss" in versions:
         try:
             import faiss
+
             versions["faiss_gpu"] = str(hasattr(faiss, "StandardGpuResources"))
         except Exception:
             pass
@@ -451,8 +461,8 @@ def _collect_package_versions() -> dict:
 
 def _collect_disk_info() -> dict:
     """Collect disk info for the project data directory."""
-    import shutil
     import os as _os
+    import shutil
 
     info: dict = {}
     project_root = _os.environ.get(
@@ -463,6 +473,7 @@ def _collect_disk_info() -> dict:
     # Disk usage on project partition
     try:
         import shutil
+
         usage = shutil.disk_usage(project_root)
         info["project_root"] = project_root
         info["disk_total_gb"] = round(usage.total / (1024**3), 1)
@@ -473,9 +484,12 @@ def _collect_disk_info() -> dict:
     # Filesystem type
     try:
         import subprocess
+
         result = subprocess.run(
             ["stat", "-f", "-c", "%T", project_root],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             info["filesystem"] = result.stdout.strip()
@@ -536,13 +550,28 @@ def _auto_memory_tracking():
         return result
 
     @functools.wraps(_orig_pedantic)
-    def _pedantic_with_memory(self, target, args=(), kwargs=None, setup=None,
-                               teardown=None, rounds=1, warmup_rounds=0, iterations=1):
+    def _pedantic_with_memory(
+        self,
+        target,
+        args=(),
+        kwargs=None,
+        setup=None,
+        teardown=None,
+        rounds=1,
+        warmup_rounds=0,
+        iterations=1,
+    ):
         wrapped_target, peaks = wrap_with_memory(target)
         result = _orig_pedantic(
-            self, wrapped_target, args=args, kwargs=kwargs,
-            setup=setup, teardown=teardown, rounds=rounds,
-            warmup_rounds=warmup_rounds, iterations=iterations,
+            self,
+            wrapped_target,
+            args=args,
+            kwargs=kwargs,
+            setup=setup,
+            teardown=teardown,
+            rounds=rounds,
+            warmup_rounds=warmup_rounds,
+            iterations=iterations,
         )
         # Store all three peak metrics
         for key in ("peak_tracemalloc_mb", "peak_rss_mb", "peak_gpu_mb"):

@@ -11,7 +11,6 @@ import pytest
 
 from twin.services.hasher import compute_ssim
 
-
 # ── Identical image pairs ─────────────────────────────────────────────────────
 
 

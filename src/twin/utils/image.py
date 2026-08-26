@@ -1,5 +1,5 @@
-from concurrent.futures import ThreadPoolExecutor
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
@@ -49,6 +49,5 @@ def load_images(paths: list, max_workers: int = 8) -> tuple[list[Image.Image], l
 def iter_image_files(directory: Path) -> list[Path]:
     """Return sorted list of image files in a directory."""
     return sorted(
-        p for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+        p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     )
