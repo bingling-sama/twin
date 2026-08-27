@@ -212,24 +212,22 @@ def rotate_image(image: Image.Image, rotation_index: int | None = 0) -> Image.Im
     return image.transpose(method)
 
 
+def _compute_rotated_hashes(image: Image.Image, hash_fn) -> list[str]:
+    """Compute image hash in 4 orthogonal orientations (0°, 90°, 180°, 270°)."""
+    return [
+        str(hash_fn(image if method is None else image.transpose(method)))
+        for method in ROTATION_ANGLES
+    ]
+
+
 def compute_rotated_dhashes(image: Image.Image) -> list[str]:
     """Compute dHash for image in 4 orthogonal orientations (0°, 90°, 180°, 270°)."""
-    return [
-        str(imagehash.dhash(image)),
-        str(imagehash.dhash(image.transpose(Image.Transpose.ROTATE_90))),
-        str(imagehash.dhash(image.transpose(Image.Transpose.ROTATE_180))),
-        str(imagehash.dhash(image.transpose(Image.Transpose.ROTATE_270))),
-    ]
+    return _compute_rotated_hashes(image, imagehash.dhash)
 
 
 def compute_rotated_phashes(image: Image.Image) -> list[str]:
     """Compute pHash for image in 4 orthogonal orientations (0°, 90°, 180°, 270°)."""
-    return [
-        str(imagehash.phash(image)),
-        str(imagehash.phash(image.transpose(Image.Transpose.ROTATE_90))),
-        str(imagehash.phash(image.transpose(Image.Transpose.ROTATE_180))),
-        str(imagehash.phash(image.transpose(Image.Transpose.ROTATE_270))),
-    ]
+    return _compute_rotated_hashes(image, imagehash.phash)
 
 
 def min_rotated_hamming_distance(hash_hex: str, target_image: Image.Image) -> int:

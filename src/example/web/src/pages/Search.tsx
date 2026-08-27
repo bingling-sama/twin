@@ -377,7 +377,7 @@ export default function Search() {
             )}
           </div>
           <button
-            className="w-full py-2.5 px-4 bg-brand-green text-ink font-semibold rounded-lg hover:bg-brand-green-hover transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            className="w-full py-2.5 px-4 bg-brand-green text-ink font-semibold rounded-full hover:bg-brand-green-hover transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             onClick={handleSearch}
             disabled={!file || loading}
           >
@@ -397,7 +397,7 @@ export default function Search() {
             />
           </div>
           <button
-            className="w-full py-2.5 px-4 bg-brand-green text-ink font-semibold rounded-lg hover:bg-brand-green-hover transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            className="w-full py-2.5 px-4 bg-brand-green text-ink font-semibold rounded-full hover:bg-brand-green-hover transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             onClick={handleSearch}
             disabled={!textPrompt.trim() || loading}
           >

@@ -32,7 +32,6 @@ from twin.services.embedding import (
     get_gpu_name,
     get_model_name,
     is_loaded,
-    is_text_supported,
 )
 from twin.services.index_service import (
     get_batch_status,
@@ -127,15 +126,6 @@ def search_endpoint(file: UploadFile = File(...)):
 )
 def search_text_endpoint(body: TextSearchRequest):
     """Search for images using a natural language text query via CLIP."""
-    if not is_text_supported():
-        model_display = get_model_name() or settings.model_name
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Current model '{model_display}' (DINOv2) is vision-only "
-                "and does not support text search. Use CLIP (e.g. ViT-B-32)."
-            ),
-        )
     try:
         result = search_by_text(body.query, body.k)
         return TextSearchResponse(**result)

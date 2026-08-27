@@ -84,3 +84,39 @@ def test_task_lru_pruning():
             assert new_tid in _tasks
             # Oldest tasks should have been evicted
             assert "old_task_0" not in _tasks
+
+
+def test_task_lru_access_refresh_prevents_eviction():
+    """Accessing a completed task via get_task_status refreshes its LRU recency,
+    protecting it from eviction.
+    """
+    with _tasks_lock:
+        _tasks.clear()
+        for i in range(MAX_TASKS):
+            _tasks[f"task_{i}"] = {
+                "task_id": f"task_{i}",
+                "status": "completed",
+                "total": 1,
+                "indexed": 1,
+            }
+
+    # Access task_0 (which was the oldest task at the front of OrderedDict)
+    status_0 = get_task_status("task_0")
+    assert status_0 is not None
+    assert status_0["task_id"] == "task_0"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        img = Image.open(FIXTURES / "red.png")
+        img.save(Path(tmpdir) / "test.png")
+
+        # Launch a new task to trigger pruning (exceeding MAX_TASKS)
+        new_tid = index_batch_async(tmpdir)
+
+        with _tasks_lock:
+            assert len(_tasks) <= MAX_TASKS + 1
+            assert new_tid in _tasks
+            # task_0 was accessed and moved to the end, so it should NOT be evicted
+            assert "task_0" in _tasks
+            # task_1 was never accessed, so it should be evicted first as the new oldest
+            assert "task_1" not in _tasks
+

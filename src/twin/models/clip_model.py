@@ -145,18 +145,22 @@ def encode_images(images: list[Image.Image]) -> "torch.Tensor":
     return features
 
 
-def encode_text(text: str) -> "torch.Tensor":
-    """Extract CLIP text embedding. Returns (1, 512) tensor on the correct device."""
-    if _model is None:
-        raise RuntimeError("CLIP model not loaded. Call load() first.")
-
+def _get_tokenizer():
+    """Lazily load and return the OpenCLIP tokenizer singleton."""
     global _tokenizer
     if _tokenizer is None:
         import open_clip
 
         _tokenizer = open_clip.get_tokenizer(_model_name or "ViT-B-32")
+    return _tokenizer
 
-    tokens = _tokenizer([text]).to(_device)
+
+def encode_text(text: str) -> "torch.Tensor":
+    """Extract CLIP text embedding. Returns (1, 512) tensor on the correct device."""
+    if _model is None:
+        raise RuntimeError("CLIP model not loaded. Call load() first.")
+
+    tokens = _get_tokenizer()([text]).to(_device)
     with torch.inference_mode():
         features = _model.encode_text(tokens)
         features = features / features.norm(dim=-1, keepdim=True)
@@ -171,13 +175,7 @@ def encode_texts(texts: list[str]) -> "torch.Tensor":
     if not texts:
         raise ValueError("Empty text list")
 
-    global _tokenizer
-    if _tokenizer is None:
-        import open_clip
-
-        _tokenizer = open_clip.get_tokenizer(_model_name or "ViT-B-32")
-
-    tokens = _tokenizer(texts).to(_device)
+    tokens = _get_tokenizer()(texts).to(_device)
     with torch.inference_mode():
         features = _model.encode_text(tokens)
         features = features / features.norm(dim=-1, keepdim=True)

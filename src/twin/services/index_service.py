@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from PIL import Image
@@ -29,17 +30,18 @@ from twin.utils.metrics import compute_progress_metrics
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Task state & bounded memory management (thread-safe)
+# Task state & bounded memory management (thread-safe LRU)
 # ---------------------------------------------------------------------------
 MAX_TASKS = 100
 _tasks_lock = threading.Lock()
-_tasks: dict[str, dict] = {}
+_tasks: OrderedDict[str, dict] = OrderedDict()
 
 
 def _prune_tasks_locked() -> None:
-    """Evict oldest finished tasks if _tasks exceeds MAX_TASKS."""
+    """Evict least recently accessed finished tasks if _tasks exceeds MAX_TASKS."""
     if len(_tasks) <= MAX_TASKS:
         return
+    # In OrderedDict, items at the front are the least recently accessed
     removable = [tid for tid, t in _tasks.items() if t.get("status") in ("completed", "failed")]
     for tid in removable:
         if len(_tasks) <= MAX_TASKS:
@@ -50,9 +52,10 @@ def _prune_tasks_locked() -> None:
 def get_task_status(task_id: str) -> dict | None:
     """Return status dictionary for a specific task ID with live computed progress."""
     with _tasks_lock:
-        task = _tasks.get(task_id)
-        if task is None:
+        if task_id not in _tasks:
             return None
+        _tasks.move_to_end(task_id)
+        task = _tasks[task_id]
         res = dict(task)
         samples = list(task.get("_processed_samples", []))
 
@@ -129,7 +132,6 @@ def index_batch_async(directory: str | Path) -> str:
 
     task_id = str(uuid.uuid4())
     with _tasks_lock:
-        _prune_tasks_locked()
         _tasks[task_id] = {
             "status": "started",
             "task_id": task_id,
@@ -146,6 +148,7 @@ def index_batch_async(directory: str | Path) -> str:
             "_processed_samples": [],
             "error": None,
         }
+        _prune_tasks_locked()
 
     def _worker():
         try:

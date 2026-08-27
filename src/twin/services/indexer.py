@@ -702,7 +702,9 @@ class Indexer:
             vectors = cpu_idx.reconstruct_n(0, n)
 
             # Build and train new index
-            dim = cpu_idx.d if cpu_idx is not None else settings.embedding_dim
+            from twin.services.embedding import get_embedding_dim
+
+            dim = cpu_idx.d if cpu_idx is not None else get_embedding_dim()
             quantizer = faiss.IndexFlatL2(dim)
 
             if target_pq:
