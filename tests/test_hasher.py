@@ -4,7 +4,20 @@ from pathlib import Path
 
 from PIL import Image
 
-from twin.services.hasher import compute_dhash, compute_dhashes, compute_phash, compute_phashes, compute_ssim, hamming_distance, is_duplicate
+from twin.services.hasher import (
+    compute_ahash,
+    compute_ahashes,
+    compute_dhash,
+    compute_dhashes,
+    compute_phash,
+    compute_phashes,
+    compute_rotated_dhashes,
+    compute_ssim,
+    compute_ssim_torch,
+    hamming_distance,
+    is_duplicate,
+    min_rotated_hamming_distance,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -125,3 +138,80 @@ def test_compute_ssim_different():
     blue = _load("blue.png")
     score = compute_ssim(red, blue)
     assert score < 0.99, f"Expected lower SSIM for different images, got {score}"
+
+
+# ---------------------------------------------------------------------------
+# aHash Tests
+# ---------------------------------------------------------------------------
+def test_ahash_identical():
+    """Identical images yield the same aHash."""
+    img_a = _load("red.png")
+    img_b = _load("red.png")
+    h1 = compute_ahash(img_a)
+    h2 = compute_ahash(img_b)
+    assert h1 == h2
+    assert hamming_distance(h1, h2) == 0
+    assert len(h1) == 16
+
+
+def test_ahash_batch_and_empty():
+    """compute_ahashes works on empty and non-empty lists."""
+    assert compute_ahashes([]) == []
+    imgs = [_load("red.png"), _load("blue.png")]
+    hashes = compute_ahashes(imgs)
+    assert len(hashes) == 2
+    assert hashes[0] == compute_ahash(imgs[0])
+    assert hashes[1] == compute_ahash(imgs[1])
+
+
+# ---------------------------------------------------------------------------
+# Rotation Invariant Tests
+# ---------------------------------------------------------------------------
+def test_rotation_invariant_hamming_distance():
+    """Rotated image matches 0 Hamming distance under rotation-aware check."""
+    red = _load("red.png")
+    h_red = compute_dhash(red)
+
+    # 90-degree rotated
+    red_90 = red.transpose(Image.Transpose.ROTATE_90)
+    min_dist_90 = min_rotated_hamming_distance(h_red, red_90)
+    assert min_dist_90 == 0
+
+    # 180-degree rotated
+    red_180 = red.transpose(Image.Transpose.ROTATE_180)
+    min_dist_180 = min_rotated_hamming_distance(h_red, red_180)
+    assert min_dist_180 == 0
+
+    # 270-degree rotated
+    red_270 = red.transpose(Image.Transpose.ROTATE_270)
+    min_dist_270 = min_rotated_hamming_distance(h_red, red_270)
+    assert min_dist_270 == 0
+
+    # compute_rotated_dhashes returns 4 orientations
+    rot_hashes = compute_rotated_dhashes(red)
+    assert len(rot_hashes) == 4
+    assert all(len(h) == 16 for h in rot_hashes)
+
+    # compute_phash
+    ph = compute_phash(red)
+    assert len(ph) == 16
+
+
+# ---------------------------------------------------------------------------
+# PyTorch / CUDA SSIM Tests
+# ---------------------------------------------------------------------------
+def test_compute_ssim_torch_cpu_and_gpu():
+    """compute_ssim_torch accurately detects identical and different images."""
+    red1 = _load("red.png")
+    red2 = _load("red.png")
+    blue = _load("blue.png")
+
+    score_same = compute_ssim_torch(red1, red2, device="cpu")
+    assert score_same >= 0.99
+
+    score_diff = compute_ssim_torch(red1, blue, device="cpu")
+    assert score_diff < 0.99
+
+    # Test via top-level compute_ssim dispatch
+    assert compute_ssim(red1, red2, use_gpu=False) >= 0.99
+    assert compute_ssim(red1, red2, use_gpu=True) >= 0.99

@@ -9,6 +9,7 @@ from PIL import Image
 from twin.models.clip_model import load as load_model
 from twin.services.indexer import indexer
 from twin.services.search import (
+    SearchCandidate,
     _assign_match_level,
     _build_response,
     _empty,
@@ -135,6 +136,7 @@ def test_assign_match_level_none():
 # ---------------------------------------------------------------------------
 def test_final_sort():
     """Results sorted by: stages_passed DESC, dhash_distance ASC, distance ASC."""
+    # Test with dicts
     results = [
         {"stages_passed": 1, "dhash_distance": 5, "distance": 0.5, "id": 1},
         {"stages_passed": 3, "dhash_distance": 10, "distance": 1.0, "id": 2},
@@ -144,8 +146,29 @@ def test_final_sort():
     ]
     _final_sort(results)
     ids = [r["id"] for r in results]
-    # id=3 (3, 2, 1.5) > id=2 (3, 10, 1.0) > id=5 (1, 3, 0.5) > id=1 (1, 5, 0.5) > id=4 (0, ...)
     assert ids == [3, 2, 5, 1, 4]
+
+    # Test with typed SearchCandidate instances
+    candidate_results = [
+        SearchCandidate(
+            id=1, filename="1.png", distance=0.5, meta={}, dhash_distance=5, stages_passed=1
+        ),
+        SearchCandidate(
+            id=2, filename="2.png", distance=1.0, meta={}, dhash_distance=10, stages_passed=3
+        ),
+        SearchCandidate(
+            id=3, filename="3.png", distance=1.5, meta={}, dhash_distance=2, stages_passed=3
+        ),
+        SearchCandidate(
+            id=4, filename="4.png", distance=0.1, meta={}, dhash_distance=0, stages_passed=0
+        ),
+        SearchCandidate(
+            id=5, filename="5.png", distance=0.5, meta={}, dhash_distance=3, stages_passed=1
+        ),
+    ]
+    _final_sort(candidate_results)
+    c_ids = [c.id for c in candidate_results]
+    assert c_ids == [3, 2, 5, 1, 4]
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +176,7 @@ def test_final_sort():
 # ---------------------------------------------------------------------------
 def test_empty_response():
     import time
+
     t0 = time.perf_counter()
     stages = {"faiss": {"in": 0}}
     result = _empty(t0, stages)
@@ -164,6 +188,7 @@ def test_empty_response():
 
 def test_build_response():
     import time
+
     t0 = time.perf_counter()
     stages = {"faiss": {"in": 1, "out": 1, "elapsed_ms": 5.0}}
     results = [
@@ -186,6 +211,26 @@ def test_build_response():
     assert item["phash_hex"] == "def"
     assert item["path"] == "/tmp/test.png"
     assert "meta" not in item  # internal key stripped
+
+    # Test with SearchCandidate
+    cand = SearchCandidate(
+        id=1,
+        filename="cand.png",
+        distance=0.456,
+        meta={"dhash": "111", "phash": "222", "path": "/tmp/cand.png"},
+        dhash_distance=2,
+        phash_distance=4,
+        ssim_score=0.98,
+        stages_passed=3,
+    )
+    resp_cand = _build_response([cand], stages, t0)
+    assert resp_cand["count"] == 1
+    cand_item = resp_cand["results"][0]
+    assert cand_item["id"] == 1
+    assert cand_item["match_level"] == "confirmed"
+    assert cand_item["dhash_hex"] == "111"
+    assert cand_item["phash_hex"] == "222"
+    assert cand_item["path"] == "/tmp/cand.png"
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +255,15 @@ def test_search_explicit_params():
     from twin.services.hasher import compute_dhash, compute_phash
 
     v = compute_embedding(img)
-    indexer.add_item(v, {
-        "filename": "red.png",
-        "path": str(FIXTURES / "red.png"),
-        "dhash": compute_dhash(img),
-        "phash": compute_phash(img),
-    })
+    indexer.add_item(
+        v,
+        {
+            "filename": "red.png",
+            "path": str(FIXTURES / "red.png"),
+            "dhash": compute_dhash(img),
+            "phash": compute_phash(img),
+        },
+    )
 
     # Search with custom params
     result = search(img, top_k=10, dhash_threshold=5, phash_threshold=5, ssim_threshold=0.80)

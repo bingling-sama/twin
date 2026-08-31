@@ -43,6 +43,7 @@ def _patch_images_dir(monkeypatch, path: Path) -> None:
 # sync_images_dir
 # ---------------------------------------------------------------------------
 
+
 def test_sync_nonexistent_directory(monkeypatch):
     """When images_path doesn't exist, sync returns zeros gracefully."""
     _patch_images_dir(monkeypatch, Path("/tmp/does_not_exist_sync_test_xyz"))
@@ -149,12 +150,15 @@ def test_sync_partial_new_files(monkeypatch):
         from twin.services.hasher import compute_dhash, compute_phash
 
         v = compute_embedding(img)
-        indexer.add_item(v, {
-            "filename": "red.png",
-            "path": str(tmp / "red.png"),
-            "dhash": compute_dhash(img),
-            "phash": compute_phash(img),
-        })
+        indexer.add_item(
+            v,
+            {
+                "filename": "red.png",
+                "path": str(tmp / "red.png"),
+                "dhash": compute_dhash(img),
+                "phash": compute_phash(img),
+            },
+        )
 
         # Second sync — red.png already indexed, blue + variant are new
         r2 = sync_images_dir()

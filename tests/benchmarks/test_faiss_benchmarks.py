@@ -15,6 +15,7 @@ import pytest
 # Benchmarks gracefully skip if faiss is not available.
 try:
     import faiss
+
     HAS_FAISS = True
 except ImportError:
     HAS_FAISS = False
@@ -247,9 +248,7 @@ def test_bench_faiss_hnsw_search_100k(benchmark, bench_hnsw_100k, bench_query_ve
 
 @pytest.mark.scaling
 @pytest.mark.parametrize("ef_search", [16, 32, 64, 128, 256])
-def test_bench_faiss_hnsw_efsearch_sweep(
-    benchmark, bench_hnsw_10k, bench_query_vec, ef_search
-):
+def test_bench_faiss_hnsw_efsearch_sweep(benchmark, bench_hnsw_10k, bench_query_vec, ef_search):
     """Benchmark: HNSW search latency vs efSearch.
 
     Higher efSearch = deeper graph exploration = better recall but slower.
@@ -373,9 +372,7 @@ def test_bench_faiss_ivfpq_search_100k(benchmark, bench_ivfpq_100k, bench_query_
 
 @pytest.mark.scaling
 @pytest.mark.parametrize("nprobe", [1, 4, 8, 16, 32])
-def test_bench_faiss_ivfpq_nprobe_sweep(
-    benchmark, bench_ivfpq_10k, bench_query_vec, nprobe
-):
+def test_bench_faiss_ivfpq_nprobe_sweep(benchmark, bench_ivfpq_10k, bench_query_vec, nprobe):
     """Benchmark: IVFPQ search latency vs nprobe.
 
     Higher nprobe = more inverted lists visited = more PQ codes decoded
@@ -541,6 +538,7 @@ def test_bench_faiss_ivfpq_memory_footprint(benchmark):
 
     # Cleanup
     import shutil
+
     shutil.rmtree(tmp, ignore_errors=True)
 
     # Theoretical sizes
@@ -643,10 +641,10 @@ def _build_ground_truth_and_approx_indexes(
     n_queries: int = 100,
     seed: int = 42,
 ) -> tuple[
-    "np.ndarray",          # database vectors
-    "np.ndarray",          # query vectors
-    "np.ndarray",          # ground truth IDs (n_queries, K)
-    "faiss.IndexFlatL2",   # Flat index (source of truth)
+    "np.ndarray",  # database vectors
+    "np.ndarray",  # query vectors
+    "np.ndarray",  # ground truth IDs (n_queries, K)
+    "faiss.IndexFlatL2",  # Flat index (source of truth)
 ]:
     """Create database, queries, and ground-truth top-50 from IndexFlatL2."""
     from tests.benchmarks.fixtures.synthetic import random_normalized_vectors
@@ -861,13 +859,16 @@ def test_bench_faiss_recall_comparison(benchmark):
 
 
 @pytest.mark.scaling
-@pytest.mark.parametrize("pq_config", [
-    (64, 8),   # default: 64 bytes/vector, 256 centroids/sub-space
-    (32, 8),   # 32 bytes/vector
-    (16, 8),   # 16 bytes/vector (aggressive)
-    (64, 6),   # 48 bytes/vector, 64 centroids/sub-space
-    (32, 6),   # 24 bytes/vector
-])
+@pytest.mark.parametrize(
+    "pq_config",
+    [
+        (64, 8),  # default: 64 bytes/vector, 256 centroids/sub-space
+        (32, 8),  # 32 bytes/vector
+        (16, 8),  # 16 bytes/vector (aggressive)
+        (64, 6),  # 48 bytes/vector, 64 centroids/sub-space
+        (32, 6),  # 24 bytes/vector
+    ],
+)
 def test_bench_faiss_ivfpq_compression_recall(benchmark, pq_config):
     """Benchmark: recall@50 vs PQ compression level at 10K.
 

@@ -35,13 +35,13 @@ class Indexer:
 
     # Known rebuild phases (used by GET /api/v1/index/rebuild/status)
     REBUILD_PHASES = (
-        "saving_current",   # caching old index to disk before switch
-        "loading_cached",   # loading pre-built target index from disk
-        "extracting",       # extracting vectors from current index
-        "building",         # creating new index + adding vectors
-        "training",         # training IVF/PQ clusters
-        "saving",           # persisting new index to disk
-        "done",             # complete
+        "saving_current",  # caching old index to disk before switch
+        "loading_cached",  # loading pre-built target index from disk
+        "extracting",  # extracting vectors from current index
+        "building",  # creating new index + adding vectors
+        "training",  # training IVF/PQ clusters
+        "saving",  # persisting new index to disk
+        "done",  # complete
     )
 
     def __init__(self) -> None:
@@ -111,6 +111,7 @@ class Indexer:
         cuda_hardware = False
         try:
             import torch
+
             cuda_hardware = torch.cuda.is_available()
         except ImportError:
             pass
@@ -178,7 +179,10 @@ class Indexer:
             is_hnsw = "HNSW" in current_name
 
             if is_hnsw:
-                return {"status": "skipped", "reason": "HNSW is CPU-only (GPU not supported by Faiss)"}
+                return {
+                    "status": "skipped",
+                    "reason": "HNSW is CPU-only (GPU not supported by Faiss)",
+                }
 
             if enabled and not currently_gpu:
                 # Try to init GPU resources
@@ -200,7 +204,10 @@ class Indexer:
                 else:
                     return {
                         "status": "unavailable",
-                        "reason": "No GPU resources available (faiss-gpu not installed or CUDA unavailable)",
+                        "reason": (
+                            "No GPU resources available (faiss-gpu not installed "
+                            "or CUDA unavailable)"
+                        ),
                     }
 
             elif not enabled and currently_gpu:
@@ -230,7 +237,9 @@ class Indexer:
         data.  HNSW is created directly since it builds the graph incrementally.
         """
         if dim is None:
-            dim = settings.embedding_dim
+            from twin.services.embedding import get_embedding_dim
+
+            dim = get_embedding_dim()
 
         idx_type = settings.faiss_index_type
         n_existing = self._index.ntotal if self._index is not None else 0
@@ -240,7 +249,9 @@ class Indexer:
             idx.hnsw.efConstruction = settings.faiss_hnsw_ef_construction
             logger.info(
                 "Created new IndexHNSWFlat (dim=%d, M=%d, efConstruction=%d)",
-                dim, settings.faiss_hnsw_m, settings.faiss_hnsw_ef_construction,
+                dim,
+                settings.faiss_hnsw_m,
+                settings.faiss_hnsw_ef_construction,
             )
             # HNSW is CPU-only — faiss does not support GPU HNSW
             if self._gpu_res is not None:
@@ -255,13 +266,18 @@ class Indexer:
                 idx = faiss.IndexIVFPQ(quantizer, dim, nlist, m, settings.faiss_pq_nbits)
                 logger.info(
                     "Created new IndexIVFPQ (dim=%d, nlist=%d, m=%d, nbits=%d)",
-                    dim, nlist, m, settings.faiss_pq_nbits,
+                    dim,
+                    nlist,
+                    m,
+                    settings.faiss_pq_nbits,
                 )
             else:
                 idx = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_L2)
                 logger.info(
                     "Created new IndexIVFFlat (dim=%d, nlist=%d, nprobe=%d)",
-                    dim, nlist, settings.faiss_nprobe,
+                    dim,
+                    nlist,
+                    settings.faiss_nprobe,
                 )
             idx.nprobe = settings.faiss_nprobe
         else:
@@ -332,7 +348,9 @@ class Indexer:
                     logger.error(
                         "REFUSING to shrink index from %d → %d vectors. "
                         "Delete %s manually if intentional.",
-                        existing.ntotal, n, faiss_path,
+                        existing.ntotal,
+                        n,
+                        faiss_path,
                     )
                     return
             except Exception:
@@ -349,9 +367,7 @@ class Indexer:
             cpu_idx = self._maybe_to_cpu(self._index)
             faiss.write_index(cpu_idx, faiss_tmp)
             meta_tmp_path = Path(meta_tmp)
-            meta_tmp_path.write_text(
-                json.dumps(self._metadata, ensure_ascii=False, indent=2)
-            )
+            meta_tmp_path.write_text(json.dumps(self._metadata, ensure_ascii=False, indent=2))
             count_tmp_path = Path(count_tmp)
             count_tmp_path.write_text(str(n))
 
@@ -412,17 +428,21 @@ class Indexer:
             candidates.append((settings.legacy_faiss_path, settings.legacy_metadata_path))
 
             # Diagnostic: log what we're looking for
-            logger.info("Searching for existing index (configured type: %s) ...",
-                        settings.faiss_index_type)
+            logger.info(
+                "Searching for existing index (configured type: %s) ...", settings.faiss_index_type
+            )
 
             # Try each candidate
             for faiss_p, meta_p in candidates:
                 faiss_exists = faiss_p.exists()
                 meta_exists = meta_p.exists()
-                logger.info("  Checking %s (faiss=%s size=%d, meta=%s)",
-                            faiss_p.name, faiss_exists,
-                            faiss_p.stat().st_size if faiss_exists else 0,
-                            meta_exists)
+                logger.info(
+                    "  Checking %s (faiss=%s size=%d, meta=%s)",
+                    faiss_p.name,
+                    faiss_exists,
+                    faiss_p.stat().st_size if faiss_exists else 0,
+                    meta_exists,
+                )
 
                 if faiss_exists and meta_exists:
                     try:
@@ -435,7 +455,8 @@ class Indexer:
                         if n_faiss != n_meta:
                             logger.warning(
                                 "  Vector count mismatch: faiss=%d, metadata=%d — using metadata",
-                                n_faiss, n_meta,
+                                n_faiss,
+                                n_meta,
                             )
 
                         # Restore runtime params not persisted by Faiss
@@ -447,7 +468,9 @@ class Indexer:
                         self._index = self._maybe_to_gpu(cpu_idx)
                         logger.info(
                             "  ✓ Loaded %s with %d vectors from %s",
-                            type(self._index).__name__, self._index.ntotal, faiss_p,
+                            type(self._index).__name__,
+                            self._index.ntotal,
+                            faiss_p,
                         )
                         # Migrate legacy files to type-specific on next save
                         if faiss_p == settings.legacy_faiss_path:
@@ -479,9 +502,12 @@ class Indexer:
             self._metadata = []
             self._dirty = False
             count_paths = [self._count_path_for(t) for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")]
-            for p in (settings.all_type_faiss_paths() + settings.all_type_metadata_paths()
-                      + count_paths
-                      + [settings.legacy_faiss_path, settings.legacy_metadata_path]):
+            for p in (
+                settings.all_type_faiss_paths()
+                + settings.all_type_metadata_paths()
+                + count_paths
+                + [settings.legacy_faiss_path, settings.legacy_metadata_path]
+            ):
                 if p.exists():
                     p.unlink()
         logger.info("Index cleared")
@@ -520,29 +546,32 @@ class Indexer:
                 ids.append(assigned)
             self._dirty = True
 
-        # Auto-upgrade outside the lock to avoid holding it during training
-        if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
-            n = self.count
-            nlist = self._resolve_nlist(n)
-            if n >= nlist * 39:  # faiss recommends >= 39*nlist for training
-                current_name = type(self._index).__name__
-                target_pq = settings.faiss_index_type == "ivf_pq"
+            # Auto-upgrade under RLock protection to prevent concurrency race
+            if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
+                n = self.count
+                nlist = self._resolve_nlist(n)
+                if n >= nlist * 39:  # faiss recommends >= 39*nlist for training
+                    current_name = type(self._index).__name__
+                    target_pq = settings.faiss_index_type == "ivf_pq"
 
-                # Tier 1: Flat → IVF / IVFPQ
-                if "Flat" in current_name and "IVF" not in current_name:
-                    logger.info(
-                        "Auto-triggering %s upgrade (%d vectors, nlist=%d)",
-                        settings.faiss_index_type, n, nlist,
-                    )
-                    self.train_index()
+                    # Tier 1: Flat → IVF / IVFPQ
+                    if "Flat" in current_name and "IVF" not in current_name:
+                        logger.info(
+                            "Auto-triggering %s upgrade (%d vectors, nlist=%d)",
+                            settings.faiss_index_type,
+                            n,
+                            nlist,
+                        )
+                        self.train_index()
 
-                # Tier 2: IVFFlat → IVFPQ
-                elif target_pq and "IVFFlat" in current_name:
-                    logger.info(
-                        "Auto-triggering IVFFlat → IVFPQ upgrade (%d vectors, nlist=%d)",
-                        n, nlist,
-                    )
-                    self.train_index()
+                    # Tier 2: IVFFlat → IVFPQ
+                    elif target_pq and "IVFFlat" in current_name:
+                        logger.info(
+                            "Auto-triggering IVFFlat → IVFPQ upgrade (%d vectors, nlist=%d)",
+                            n,
+                            nlist,
+                        )
+                        self.train_index()
 
         return ids
 
@@ -578,9 +607,7 @@ class Indexer:
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
-    def search(
-        self, query: np.ndarray, k: int | None = None
-    ) -> tuple[list[float], list[int]]:
+    def search(self, query: np.ndarray, k: int | None = None) -> tuple[list[float], list[int]]:
         """Search for k nearest neighbors. Returns (distances, ids)."""
         if k is None:
             k = settings.top_k
@@ -599,9 +626,7 @@ class Indexer:
             if hasattr(self._index, "hnsw"):
                 self._index.hnsw.efSearch = settings.faiss_hnsw_ef_search
 
-            distances, indices = self._index.search(
-                query.reshape(1, -1).astype(np.float32), k
-            )
+            distances, indices = self._index.search(query.reshape(1, -1).astype(np.float32), k)
             return distances[0].tolist(), indices[0].tolist()
 
     # ------------------------------------------------------------------
@@ -637,7 +662,10 @@ class Indexer:
             if not target_ivf:
                 return {
                     "status": "skipped",
-                    "reason": f"faiss_index_type={settings.faiss_index_type}, not ivf_flat or ivf_pq",
+                    "reason": (
+                        f"faiss_index_type={settings.faiss_index_type}, "
+                        "not ivf_flat or ivf_pq"
+                    ),
                 }
 
             # Already at target?
@@ -662,15 +690,21 @@ class Indexer:
             if from_ivf_flat:
                 logger.info("Upgrading IVFFlat → IVFPQ (nlist=%d, n_vectors=%d) ...", nlist, n)
             else:
-                logger.info("Training %s index (nlist=%d, n_vectors=%d) ...",
-                            settings.faiss_index_type, nlist, n)
+                logger.info(
+                    "Training %s index (nlist=%d, n_vectors=%d) ...",
+                    settings.faiss_index_type,
+                    nlist,
+                    n,
+                )
 
             # Extract all vectors from current index
             cpu_idx = self._maybe_to_cpu(self._index)
             vectors = cpu_idx.reconstruct_n(0, n)
 
             # Build and train new index
-            dim = settings.embedding_dim
+            from twin.services.embedding import get_embedding_dim
+
+            dim = cpu_idx.d if cpu_idx is not None else get_embedding_dim()
             quantizer = faiss.IndexFlatL2(dim)
 
             if target_pq:
@@ -682,7 +716,11 @@ class Indexer:
                 idx_label = "IndexIVFPQ"
                 logger.info(
                     "IVFPQ training complete (nlist=%d, m=%d, nbits=%d, nprobe=%d, %d vectors)",
-                    nlist, m, settings.faiss_pq_nbits, settings.faiss_nprobe, n,
+                    nlist,
+                    m,
+                    settings.faiss_pq_nbits,
+                    settings.faiss_nprobe,
+                    n,
                 )
             else:
                 new_idx = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_L2)
@@ -692,7 +730,9 @@ class Indexer:
                 idx_label = "IndexIVFFlat"
                 logger.info(
                     "IVF training complete (nlist=%d, nprobe=%d, %d vectors)",
-                    nlist, settings.faiss_nprobe, n,
+                    nlist,
+                    settings.faiss_nprobe,
+                    n,
                 )
 
             # Swap
@@ -719,6 +759,7 @@ class Indexer:
     def rebuild_status(self) -> dict:
         """Return a snapshot of the current/last rebuild operation."""
         import time
+
         s = dict(self._rebuild_state)
         if s["running"] and s["started_at"] is not None:
             s["elapsed_ms"] = (time.perf_counter() - s["started_at"]) * 1000
@@ -766,11 +807,14 @@ class Indexer:
     def _set_rebuild_phase(self, phase: str, n_vectors: int = 0) -> None:
         """Update shared rebuild progress (caller may hold _lock)."""
         import time
+
         self._rebuild_state.update(
             running=(phase != "done"),
             phase=phase,
             n_vectors=n_vectors,
-            started_at=time.perf_counter() if phase != "done" and self._rebuild_state.get("started_at") is None else self._rebuild_state.get("started_at"),
+            started_at=time.perf_counter()
+            if phase != "done" and self._rebuild_state.get("started_at") is None
+            else self._rebuild_state.get("started_at"),
         )
 
     def rebuild(self) -> dict:
@@ -787,7 +831,7 @@ class Indexer:
 
         Returns a status dict with the new index type and vector count.
         """
-        import time
+
         try:
             with self._lock:
                 old_type_key = self._runtime_type_key()
@@ -825,8 +869,11 @@ class Indexer:
                         # ── Incremental: add missing vectors ──
                         if cached_count < n:
                             new_count = n - cached_count
-                            logger.info("Incrementally adding %d new vectors to cached %s index",
-                                        new_count, target_type)
+                            logger.info(
+                                "Incrementally adding %d new vectors to cached %s index",
+                                new_count,
+                                target_type,
+                            )
                             # Extract only new vectors from active index (IDs cached_count .. n-1)
                             active_cpu = self._maybe_to_cpu(self._index)
                             new_vecs = active_cpu.reconstruct_n(cached_count, new_count)
@@ -840,7 +887,9 @@ class Indexer:
                         if cached_count < n:
                             # Save updated cache immediately (don't wait for auto-save)
                             self._save_for_type(target_type)
-                            logger.info("Updated cached %s: %d → %d vectors", new_name, cached_count, n)
+                            logger.info(
+                                "Updated cached %s: %d → %d vectors", new_name, cached_count, n
+                            )
                         else:
                             logger.info("Switched to cached %s (%d vectors) — instant", new_name, n)
 
@@ -854,7 +903,9 @@ class Indexer:
                             "added": max(0, n - cached_count),
                         }
                     except Exception as e:
-                        logger.warning("Cached %s index failed (%s), doing full rebuild", target_type, e)
+                        logger.warning(
+                            "Cached %s index failed (%s), doing full rebuild", target_type, e
+                        )
 
                 # ── Empty index ──
                 if n == 0:
@@ -891,30 +942,32 @@ class Indexer:
                 new_name = type(self._index).__name__.replace("GpuIndex", "")
                 logger.info("Built %s with %d vectors", new_name, n)
 
-            # ── Phase: training (outside lock) ──
-            if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
-                nlist = self._resolve_nlist(n)
-                if n >= nlist * 39:
-                    cn = type(self._index).__name__
-                    if "Flat" in cn and "IVF" not in cn:
-                        self._set_rebuild_phase("training", n)
-                        logger.info("Auto-training after rebuild (%d vectors, nlist=%d)", n, nlist)
-                        self.train_index()
-                        new_name = type(self._index).__name__.replace("GpuIndex", "")
-                        self._dirty = True
+                # ── Phase: training ──
+                target_ivf = settings.faiss_index_type in ("ivf_flat", "ivf_pq")
+                if settings.faiss_auto_upgrade and target_ivf:
+                    nlist = self._resolve_nlist(n)
+                    if n >= nlist * 39:
+                        cn = type(self._index).__name__
+                        if "Flat" in cn and "IVF" not in cn:
+                            self._set_rebuild_phase("training", n)
+                            logger.info(
+                                "Auto-training after rebuild (%d vectors, nlist=%d)", n, nlist
+                            )
+                            self.train_index()
+                            new_name = type(self._index).__name__.replace("GpuIndex", "")
+                            self._dirty = True
 
-            # ── Phase: saving ──
-            self._set_rebuild_phase("saving", n)
-            with self._lock:
+                # ── Phase: saving ──
+                self._set_rebuild_phase("saving", n)
                 self._save_for_type(settings.faiss_index_type)
 
-            self._set_rebuild_phase("done", n)
-            return {
-                "status": "rebuilt",
-                "index_type": new_name,
-                "n_vectors": n,
-                "cached": False,
-            }
+                self._set_rebuild_phase("done", n)
+                return {
+                    "status": "rebuilt",
+                    "index_type": new_name,
+                    "n_vectors": n,
+                    "cached": False,
+                }
         except Exception:
             self._set_rebuild_phase("done", 0)
             raise
