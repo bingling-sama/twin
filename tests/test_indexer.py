@@ -3,6 +3,7 @@
 import tempfile
 import threading
 
+import faiss
 import numpy as np
 import pytest
 
@@ -322,8 +323,6 @@ def test_auto_save_disabled(monkeypatch):
 # ============================================================================
 # HNSW index tests
 # ============================================================================
-
-import faiss
 
 
 def test_create_hnsw_index(monkeypatch):

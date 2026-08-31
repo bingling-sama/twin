@@ -62,7 +62,7 @@ function ZoomImage({ src, alt, onMeta }: { src: string; alt: string; onMeta?: (m
   }
 
   const cursor = zoom > 1 ? (dragging ? "grabbing" : "grab") : "zoom-in";
-  const btn = "text-ink px-2 py-1 rounded text-base min-w-[32px] text-center cursor-pointer hover:bg-surface disabled:opacity-30 disabled:cursor-default";
+  const btn = "text-ink px-2 py-1 rounded-full text-base min-w-[32px] text-center cursor-pointer hover:bg-surface disabled:opacity-30 disabled:cursor-default";
 
   return (
     <div className="flex flex-col flex-1 min-h-0 mb-4">
@@ -149,7 +149,7 @@ function ResultPreviewModal({
         <div className="flex justify-between items-center mb-0">
           <strong className="text-sm text-ink">{filename}</strong>
           <button
-            className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded cursor-pointer leading-none"
+            className="text-2xl text-steel hover:bg-surface px-2 py-0.5 rounded-full cursor-pointer leading-none"
             onClick={onClose}
           >
             ×
@@ -188,7 +188,7 @@ function ResultPreviewModal({
                   <td className="text-stone font-normal pr-3 py-1">Match</td>
                   <td className="py-1">
                     <span
-                      className={`inline-block text-[13px] font-semibold px-2 py-0.5 rounded-sm text-white ${
+                      className={`inline-block text-[13px] font-semibold px-2 py-0.5 rounded-full text-white ${
                         match_level === "confirmed"
                           ? "bg-brand-green-dark"
                           : match_level === "suspected"
@@ -363,7 +363,7 @@ export default function Search() {
                 </div>
                 <button
                   type="button"
-                  className="text-xs text-muted hover:text-ink px-2 py-1 rounded hover:bg-surface cursor-pointer"
+                  className="text-xs text-muted hover:text-ink px-2 py-1 rounded-full hover:bg-surface cursor-pointer"
                   onClick={(e) => { e.stopPropagation(); setFile(null); setPreviewUrl(null); }}
                 >
                   Change
@@ -454,7 +454,7 @@ export default function Search() {
                     <div className="relative aspect-square bg-surface">
                       <img src={imageUrl(r.filename)} alt={r.filename} loading="lazy" className="w-full h-full object-contain block" />
                       {badge?.text && (
-                        <span className={`absolute top-1.5 right-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded text-white ${badge.cls}`}>
+                        <span className={`absolute top-1.5 right-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full text-white ${badge.cls}`}>
                           {badge.text}
                         </span>
                       )}
@@ -477,7 +477,7 @@ export default function Search() {
         <div>
           <p className="text-sm text-slate mb-4 flex flex-wrap items-center gap-3">
             <span>{textResults.count} result{textResults.count !== 1 ? "s" : ""} for <strong className="text-ink">"{textResults.query}"</strong> in {textResults.query_time_ms}ms</span>
-            <span className="inline-block bg-surface border border-hairline px-2 py-0.5 rounded font-mono text-xs text-brand-green-dark">
+            <span className="inline-block bg-surface border border-hairline px-2 py-0.5 rounded-full font-mono text-xs text-brand-green-dark">
               CLIP Semantic Recall
             </span>
           </p>

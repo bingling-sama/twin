@@ -43,7 +43,6 @@ def gradient_image(size: tuple[int, int] = (224, 224), seed: int | None = None) 
     Gradient images produce stable perceptual hashes and are useful
     for deterministic hash and SSIM benchmarks.
     """
-    rng = np.random.RandomState(seed) if seed is not None else _rng
     w, h = size
     # Horizontal gradient: R and G vary left→right, B is constant
     ramp = np.linspace(0, 255, w, dtype=np.uint8)
@@ -62,7 +61,6 @@ def checkerboard_image(
     Strong structural content — ideal for SSIM benchmarks where
     identical images should score 1.0 and modified ones < 1.0.
     """
-    rng = np.random.RandomState(seed) if seed is not None else _rng
     w, h = size
     square_w, square_h = w // squares, h // squares
     arr = np.zeros((h, w, 3), dtype=np.uint8)

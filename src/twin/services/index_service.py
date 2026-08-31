@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
@@ -28,6 +29,9 @@ from twin.utils.image import IMAGE_EXTENSIONS, load_images
 from twin.utils.metrics import compute_progress_metrics
 
 logger = logging.getLogger(__name__)
+
+# Bounded single-worker queue for async batch indexing (prevents GPU/CPU resource contention)
+_batch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-index")
 
 # ---------------------------------------------------------------------------
 # Task state & bounded memory management (thread-safe LRU)
@@ -175,8 +179,7 @@ def index_batch_async(directory: str | Path) -> str:
                         error=str(e),
                     )
 
-    thread = threading.Thread(target=_worker, daemon=True, name=f"batch-index-{task_id[:8]}")
-    thread.start()
+    _batch_executor.submit(_worker)
     return task_id
 
 

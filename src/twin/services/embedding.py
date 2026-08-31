@@ -55,6 +55,11 @@ def load_model(
         )
 
 
+def _active_model_module():
+    """Return the active model singleton module (clip_model or dinov2_model)."""
+    return dinov2_model if _active_model_type == "dinov2" else clip_model
+
+
 def get_active_model_type() -> str:
     """Return runtime active model type ('clip' | 'dinov2')."""
     return _active_model_type
@@ -62,39 +67,28 @@ def get_active_model_type() -> str:
 
 def is_loaded() -> bool:
     """Check if the active model singleton is loaded."""
-    if _active_model_type == "dinov2":
-        return dinov2_model.is_loaded()
-    return clip_model.is_loaded()
+    return _active_model_module().is_loaded()
 
 
 def get_device() -> str:
     """Return device string ('cuda', 'mps', 'cpu') for active model."""
-    if _active_model_type == "dinov2":
-        return dinov2_model.get_device()
-    return clip_model.get_device()
+    return _active_model_module().get_device()
 
 
 def get_model_name() -> str:
     """Return active model variant name."""
-    if _active_model_type == "dinov2":
-        return dinov2_model.get_model_name()
-    return clip_model.get_model_name()
+    return _active_model_module().get_model_name()
 
 
 def get_gpu_name() -> str:
     """Return active model GPU name if on CUDA."""
-    if _active_model_type == "dinov2":
-        return dinov2_model.get_gpu_name()
-    return clip_model.get_gpu_name()
+    return _active_model_module().get_gpu_name()
 
 
 def get_embedding_dim() -> int:
     """Return active embedding dimension."""
-    if _active_model_type == "dinov2":
-        return (
-            dinov2_model.get_embedding_dim() if dinov2_model.is_loaded() else _active_embedding_dim
-        )
-    return clip_model.get_embedding_dim() if clip_model.is_loaded() else _active_embedding_dim
+    model = _active_model_module()
+    return model.get_embedding_dim() if model.is_loaded() else _active_embedding_dim
 
 
 def is_text_supported() -> bool:
@@ -109,10 +103,7 @@ def compute_embedding(image: Image.Image) -> np.ndarray:
     The image should already be RGB.
     """
     start = time.perf_counter()
-    if _active_model_type == "dinov2":
-        features = dinov2_model.encode_image(image)
-    else:
-        features = clip_model.encode_image(image)
+    features = _active_model_module().encode_image(image)
     vector = features.squeeze(0).cpu().numpy().astype(np.float32)
     elapsed = time.perf_counter() - start
     logger.debug("Embedding computed in %.0fms", elapsed * 1000)
@@ -130,10 +121,7 @@ def compute_embeddings(images: list[Image.Image]) -> np.ndarray:
         return np.empty((0, dim), dtype=np.float32)
 
     start = time.perf_counter()
-    if _active_model_type == "dinov2":
-        features = dinov2_model.encode_images(images)
-    else:
-        features = clip_model.encode_images(images)
+    features = _active_model_module().encode_images(images)
     vectors = features.cpu().numpy().astype(np.float32)
     elapsed = time.perf_counter() - start
     logger.debug(

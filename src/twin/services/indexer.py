@@ -546,32 +546,32 @@ class Indexer:
                 ids.append(assigned)
             self._dirty = True
 
-        # Auto-upgrade outside the lock to avoid holding it during training
-        if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
-            n = self.count
-            nlist = self._resolve_nlist(n)
-            if n >= nlist * 39:  # faiss recommends >= 39*nlist for training
-                current_name = type(self._index).__name__
-                target_pq = settings.faiss_index_type == "ivf_pq"
+            # Auto-upgrade under RLock protection to prevent concurrency race
+            if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
+                n = self.count
+                nlist = self._resolve_nlist(n)
+                if n >= nlist * 39:  # faiss recommends >= 39*nlist for training
+                    current_name = type(self._index).__name__
+                    target_pq = settings.faiss_index_type == "ivf_pq"
 
-                # Tier 1: Flat → IVF / IVFPQ
-                if "Flat" in current_name and "IVF" not in current_name:
-                    logger.info(
-                        "Auto-triggering %s upgrade (%d vectors, nlist=%d)",
-                        settings.faiss_index_type,
-                        n,
-                        nlist,
-                    )
-                    self.train_index()
+                    # Tier 1: Flat → IVF / IVFPQ
+                    if "Flat" in current_name and "IVF" not in current_name:
+                        logger.info(
+                            "Auto-triggering %s upgrade (%d vectors, nlist=%d)",
+                            settings.faiss_index_type,
+                            n,
+                            nlist,
+                        )
+                        self.train_index()
 
-                # Tier 2: IVFFlat → IVFPQ
-                elif target_pq and "IVFFlat" in current_name:
-                    logger.info(
-                        "Auto-triggering IVFFlat → IVFPQ upgrade (%d vectors, nlist=%d)",
-                        n,
-                        nlist,
-                    )
-                    self.train_index()
+                    # Tier 2: IVFFlat → IVFPQ
+                    elif target_pq and "IVFFlat" in current_name:
+                        logger.info(
+                            "Auto-triggering IVFFlat → IVFPQ upgrade (%d vectors, nlist=%d)",
+                            n,
+                            nlist,
+                        )
+                        self.train_index()
 
         return ids
 
@@ -942,30 +942,32 @@ class Indexer:
                 new_name = type(self._index).__name__.replace("GpuIndex", "")
                 logger.info("Built %s with %d vectors", new_name, n)
 
-            # ── Phase: training (outside lock) ──
-            if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
-                nlist = self._resolve_nlist(n)
-                if n >= nlist * 39:
-                    cn = type(self._index).__name__
-                    if "Flat" in cn and "IVF" not in cn:
-                        self._set_rebuild_phase("training", n)
-                        logger.info("Auto-training after rebuild (%d vectors, nlist=%d)", n, nlist)
-                        self.train_index()
-                        new_name = type(self._index).__name__.replace("GpuIndex", "")
-                        self._dirty = True
+                # ── Phase: training ──
+                target_ivf = settings.faiss_index_type in ("ivf_flat", "ivf_pq")
+                if settings.faiss_auto_upgrade and target_ivf:
+                    nlist = self._resolve_nlist(n)
+                    if n >= nlist * 39:
+                        cn = type(self._index).__name__
+                        if "Flat" in cn and "IVF" not in cn:
+                            self._set_rebuild_phase("training", n)
+                            logger.info(
+                                "Auto-training after rebuild (%d vectors, nlist=%d)", n, nlist
+                            )
+                            self.train_index()
+                            new_name = type(self._index).__name__.replace("GpuIndex", "")
+                            self._dirty = True
 
-            # ── Phase: saving ──
-            self._set_rebuild_phase("saving", n)
-            with self._lock:
+                # ── Phase: saving ──
+                self._set_rebuild_phase("saving", n)
                 self._save_for_type(settings.faiss_index_type)
 
-            self._set_rebuild_phase("done", n)
-            return {
-                "status": "rebuilt",
-                "index_type": new_name,
-                "n_vectors": n,
-                "cached": False,
-            }
+                self._set_rebuild_phase("done", n)
+                return {
+                    "status": "rebuilt",
+                    "index_type": new_name,
+                    "n_vectors": n,
+                    "cached": False,
+                }
         except Exception:
             self._set_rebuild_phase("done", 0)
             raise

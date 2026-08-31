@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
+    import faiss
     import numpy as np
     from PIL import Image
 
@@ -342,7 +343,6 @@ def _collect_memory_info() -> dict:
 
         total_kb = _kb("MemTotal")
         available_kb = _kb("MemAvailable")
-        free_kb = _kb("MemFree")
         swap_total_kb = _kb("SwapTotal")
         swap_free_kb = _kb("SwapFree")
 

@@ -107,3 +107,59 @@ def test_asymmetric_image_rotation_full_funnel(tmp_path):
     assert item["dhash_distance"] == 0
     assert item["phash_distance"] == 0
     assert item["ssim_score"] >= 0.95
+
+
+def test_asymmetric_image_rotation_stage1_recall(tmp_path):
+    """Rotated asymmetric query is recalled in Stage 1 via orthogonal batch embeddings
+    even among multiple distractor images.
+    """
+    import numpy as np
+
+    from twin.services.embedding import compute_embedding
+
+    # Create target asymmetric test image
+    arr = np.zeros((100, 100, 3), dtype=np.uint8)
+    arr[:50, :50] = [255, 0, 0]
+    arr[50:, :50] = [0, 255, 0]
+    arr[:50, 50:] = [0, 0, 255]
+    arr[50:, 50:] = [255, 255, 0]
+    img = Image.fromarray(arr, mode="RGB")
+    target_path = tmp_path / "target.png"
+    img.save(target_path)
+    indexer.add_item(
+        compute_embedding(img),
+        {
+            "filename": "target.png",
+            "path": str(target_path),
+            "dhash": compute_dhash(img),
+            "phash": compute_phash(img),
+        },
+    )
+
+    # Add 5 distractor images
+    for i in range(5):
+        d_arr = np.full((100, 100, 3), fill_value=i * 40, dtype=np.uint8)
+        d_img = Image.fromarray(d_arr, mode="RGB")
+        d_path = tmp_path / f"distractor_{i}.png"
+        d_img.save(d_path)
+        indexer.add_item(
+            compute_embedding(d_img),
+            {
+                "filename": f"distractor_{i}.png",
+                "path": str(d_path),
+                "dhash": compute_dhash(d_img),
+                "phash": compute_phash(d_img),
+            },
+        )
+
+    # Query with 270° rotated image
+    rot_270 = img.transpose(Image.Transpose.ROTATE_270)
+    res = search(rot_270, top_k=5, rotation_invariant=True)
+    assert res["count"] >= 1
+    top_result = res["results"][0]
+    assert top_result["filename"] == "target.png"
+    assert top_result["match_level"] == "confirmed"
+    assert top_result["dhash_distance"] == 0
+    assert top_result["phash_distance"] == 0
+    assert top_result["ssim_score"] >= 0.95
+

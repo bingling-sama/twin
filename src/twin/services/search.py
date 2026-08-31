@@ -21,7 +21,7 @@ from pathlib import Path
 from PIL import Image
 
 from twin.core.config import settings
-from twin.services.embedding import compute_embedding
+from twin.services.embedding import compute_embedding, compute_embeddings
 from twin.services.hasher import (
     compute_dhash,
     compute_phash,
@@ -54,6 +54,21 @@ class SearchCandidate:
     stages_passed: int = 0
     candidate_rotations: list[int] = field(default_factory=lambda: [0])
     best_rotation: int = 0
+
+    def to_api_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "filename": self.filename,
+            "distance": self.distance,
+            "match_level": _assign_match_level(self.stages_passed),
+            "stages_passed": self.stages_passed,
+            "dhash_distance": self.dhash_distance,
+            "phash_distance": self.phash_distance,
+            "ssim_score": self.ssim_score,
+            "dhash_hex": self.meta.get("dhash", ""),
+            "phash_hex": self.meta.get("phash", ""),
+            "path": self.meta.get("path", ""),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +117,25 @@ def _assign_match_level(stages_passed: int) -> str:
     return "none"
 
 
+def _candidate_to_api_dict(c: SearchCandidate | dict) -> dict:
+    if isinstance(c, SearchCandidate):
+        return c.to_api_dict()
+    meta = c.get("meta", {}) if isinstance(c.get("meta"), dict) else {}
+    return {
+        "id": c["id"],
+        "filename": c["filename"],
+        "distance": c["distance"],
+        "match_level": _assign_match_level(c["stages_passed"]),
+        "stages_passed": c["stages_passed"],
+        "dhash_distance": c["dhash_distance"],
+        "phash_distance": c["phash_distance"],
+        "ssim_score": c["ssim_score"],
+        "dhash_hex": meta.get("dhash", ""),
+        "phash_hex": meta.get("phash", ""),
+        "path": meta.get("path", ""),
+    }
+
+
 def _final_sort(results: list[SearchCandidate | dict]) -> None:
     """In-place sort: most stages passed first, then dHash ASC, then L2 ASC."""
     def _key(r):
@@ -115,44 +149,9 @@ def _final_sort(results: list[SearchCandidate | dict]) -> None:
 def _build_response(results: list[SearchCandidate | dict], stages: dict, t0: float) -> dict:
     """Clean up internal keys and return API-ready dict."""
     elapsed = time.perf_counter() - t0
-    output = []
-    for c in results:
-        if isinstance(c, SearchCandidate):
-            output.append(
-                {
-                    "id": c.id,
-                    "filename": c.filename,
-                    "distance": c.distance,
-                    "match_level": _assign_match_level(c.stages_passed),
-                    "stages_passed": c.stages_passed,
-                    "dhash_distance": c.dhash_distance,
-                    "phash_distance": c.phash_distance,
-                    "ssim_score": c.ssim_score,
-                    "dhash_hex": c.meta.get("dhash", ""),
-                    "phash_hex": c.meta.get("phash", ""),
-                    "path": c.meta.get("path", ""),
-                }
-            )
-        else:
-            meta = c.get("meta", {}) if isinstance(c.get("meta"), dict) else {}
-            output.append(
-                {
-                    "id": c["id"],
-                    "filename": c["filename"],
-                    "distance": c["distance"],
-                    "match_level": _assign_match_level(c["stages_passed"]),
-                    "stages_passed": c["stages_passed"],
-                    "dhash_distance": c["dhash_distance"],
-                    "phash_distance": c["phash_distance"],
-                    "ssim_score": c["ssim_score"],
-                    "dhash_hex": meta.get("dhash", ""),
-                    "phash_hex": meta.get("phash", ""),
-                    "path": meta.get("path", ""),
-                }
-            )
     return {
-        "results": output,
-        "count": len(output),
+        "results": [_candidate_to_api_dict(c) for c in results],
+        "count": len(results),
         "query_time_ms": round(elapsed * 1000, 3),
         "stages": stages,
     }
@@ -175,7 +174,7 @@ def search(
     Stage 1: CLIP/DINOv2 → Faiss top-K semantic candidates.
     Stage 2–4: Sequential filters (dHash → pHash → SSIM), each operating
     only on survivors of the previous stage.
-    Supports rotation tolerance in Stage 2 (0°, 90°, 180°, 270°).
+    Supports rotation tolerance across Stage 1–4 (0°, 90°, 180°, 270°).
 
     Returns list of result dicts sorted by match_level.
     """
@@ -196,11 +195,29 @@ def search(
     # ==================================================================
     # Stage 1: Semantic retrieval (Faiss top-K)
     # ==================================================================
-    query_vec = compute_embedding(image)
     query_dhash = compute_dhash(image)
     query_phash = compute_phash(image)
 
-    distances, indices = indexer.search(query_vec, k=top_k)
+    if rotation_invariant:
+        # Extract 4 orthogonal rotation embeddings in a single batch forward pass
+        rotated_imgs = [rotate_image(image, a) for a in (0, 1, 2, 3)]
+        query_vecs = compute_embeddings(rotated_imgs)
+
+        # Query Faiss for each rotation and merge candidate pools taking minimum distance
+        best_candidate_distances: dict[int, float] = {}
+        for vec in query_vecs:
+            dists, idxs = indexer.search(vec, k=top_k)
+            for d, idx in zip(dists, idxs):
+                if idx not in best_candidate_distances or d < best_candidate_distances[idx]:
+                    best_candidate_distances[idx] = float(d)
+
+        sorted_candidates = sorted(best_candidate_distances.items(), key=lambda x: x[1])[:top_k]
+        indices = [idx for idx, _ in sorted_candidates]
+        distances = [d for _, d in sorted_candidates]
+    else:
+        query_vec = compute_embedding(image)
+        distances, indices = indexer.search(query_vec, k=top_k)
+
     t1 = time.perf_counter()
     stages["faiss"] = {"in": 0, "out": len(indices), "elapsed_ms": round((t1 - t0) * 1000, 3)}
 
