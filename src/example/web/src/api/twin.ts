@@ -62,6 +62,28 @@ export async function searchImage(file: File): Promise<SearchResponse> {
   return data;
 }
 
+// ── Text Search (Multi-modal) ───────────────────────────────────────
+export interface TextSearchResultItem {
+  id: number;
+  filename: string;
+  distance: number;
+  path: string;
+  dhash_hex: string;
+  phash_hex: string;
+}
+
+export interface TextSearchResponse {
+  query: string;
+  results: TextSearchResultItem[];
+  count: number;
+  query_time_ms: number;
+}
+
+export async function searchText(query: string, k = 50): Promise<TextSearchResponse> {
+  const { data } = await api.post<TextSearchResponse>("/search/text", { query, k });
+  return data;
+}
+
 // ── Index (single) ──────────────────────────────────────────────────
 export interface IndexStatus {
   status: string;

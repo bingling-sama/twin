@@ -31,6 +31,7 @@ def _clear_index():
 # index_single
 # ---------------------------------------------------------------------------
 
+
 def test_index_single_happy_path():
     """Direct call to index_single stores image + returns indexed status."""
     _ensure_model()
@@ -67,6 +68,7 @@ def test_index_single_already_exists():
 # _index_single_from_disk
 # ---------------------------------------------------------------------------
 
+
 def test_index_single_from_disk():
     """Internal helper indexes an image that's already on disk."""
     _ensure_model()
@@ -88,6 +90,7 @@ def test_index_single_from_disk():
 # ---------------------------------------------------------------------------
 # index_batch
 # ---------------------------------------------------------------------------
+
 
 def test_index_batch_happy_path():
     """Batch-index images from a directory."""

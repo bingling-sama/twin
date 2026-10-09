@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
@@ -19,13 +20,24 @@ def load_image(path: str | Path) -> Image.Image | None:
         return None
 
 
-def load_images(paths: list) -> tuple[list[Image.Image], list, list]:
-    """Load a batch of images. Returns (valid_images, valid_paths, failed_paths)."""
+def load_images(paths: list, max_workers: int = 8) -> tuple[list[Image.Image], list, list]:
+    """Load a batch of images in parallel. Returns (valid_images, valid_paths, failed_paths)."""
+    if not paths:
+        return [], [], []
+
+    if len(paths) == 1:
+        img = load_image(paths[0])
+        if img is not None:
+            return [img], [paths[0]], []
+        return [], [], [paths[0]]
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(paths))) as executor:
+        results = list(executor.map(load_image, paths))
+
     imgs = []
     ok = []
     failed = []
-    for p in paths:
-        img = load_image(p)
+    for p, img in zip(paths, results):
         if img is not None:
             imgs.append(img)
             ok.append(p)
@@ -37,6 +49,5 @@ def load_images(paths: list) -> tuple[list[Image.Image], list, list]:
 def iter_image_files(directory: Path) -> list[Path]:
     """Return sorted list of image files in a directory."""
     return sorted(
-        p for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+        p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     )

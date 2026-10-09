@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TWIN_", env_file=".env", extra="ignore")
 
     # --- Model ---
+    model_type: str = "clip"  # "clip" | "dinov2"
     model_name: str = "ViT-B-32"
+    dinov2_model_name: str = "vit_small_patch14_dinov2"
     pretrained: str = "openai"
     embedding_dim: int = 512
     device: str = ""  # 'cuda', 'mps', 'cpu', or '' for auto-detect
@@ -30,26 +32,29 @@ class Settings(BaseSettings):
     index_path: str = "data"
     images_dir: str = "data/images"
     faiss_index_type: str = "ivf_flat"  # "flat" | "ivf_flat" | "ivf_pq" | "hnsw"
-    faiss_nlist: int = 0             # IVF centroids; 0 = auto (4 * sqrt(N))
-    faiss_nprobe: int = 16           # IVF search-time probes; higher = more recall (was 8)
+    faiss_nlist: int = 0  # IVF centroids; 0 = auto (4 * sqrt(N))
+    faiss_nprobe: int = 16  # IVF search-time probes; higher = more recall (was 8)
     faiss_auto_upgrade: bool = True  # auto-convert Flat→IVF when enough vectors (no-op for hnsw)
-    faiss_gpu: bool = True           # try GPU Faiss if CUDA is available (ignored for hnsw)
+    faiss_gpu: bool = True  # try GPU Faiss if CUDA is available (ignored for hnsw)
 
     # --- PQ (Product Quantization, for ivf_pq) ---
-    faiss_pq_m: int = 0              # sub-quantizers; 0 = auto (embedding_dim // 8). Must divide dim evenly
-    faiss_pq_nbits: int = 8          # bits per PQ code (8 = 256 centroids per sub-space)
+    faiss_pq_m: int = 0  # sub-quantizers; 0 = auto (embedding_dim // 8). Must divide dim evenly
+    faiss_pq_nbits: int = 8  # bits per PQ code (8 = 256 centroids per sub-space)
 
     # --- HNSW (graph-based index, no training needed) ---
-    faiss_hnsw_m: int = 32                # graph degree (bi-directional links per node, 4-64)
+    faiss_hnsw_m: int = 32  # graph degree (bi-directional links per node, 4-64)
     faiss_hnsw_ef_construction: int = 200  # build-time exploration depth (100-2000)
-    faiss_hnsw_ef_search: int = 128        # search-time exploration depth (higher = more recall, was 64)
+    faiss_hnsw_ef_search: int = 128  # search-time exploration depth (higher = more recall, was 64)
 
     # --- Search ---
     top_k: int = 100
-    dhash_threshold: int = 10   # max Hamming distance for dHash duplicate
-    phash_threshold: int = 12   # max Hamming distance for pHash duplicate
+    rotation_invariant: bool = True  # tolerate 0/90/180/270 deg rotation during dHash verification
+    ahash_threshold: int = 10  # max Hamming distance for aHash pre-filter
+    dhash_threshold: int = 10  # max Hamming distance for dHash duplicate
+    phash_threshold: int = 12  # max Hamming distance for pHash duplicate
     ssim_threshold: float = 0.90  # min SSIM for structural duplicate
     ssim_size: int = 128  # resize dimension for SSIM comparison (128 = fast, 256 = precise)
+    ssim_device: str = "auto"  # 'auto' | 'cuda' | 'cpu'
 
     # --- Auto-save ---
     auto_save_interval: int = 120  # seconds between periodic saves; 0 = disable (was 300)

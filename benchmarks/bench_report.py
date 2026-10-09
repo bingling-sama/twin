@@ -264,7 +264,11 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
         }.get(group_key, group_key)
 
         print(f"  ── {group_title} ──")
-        print(f"  {'Benchmark':<48} {'Mean':>10} {'Min':>10} {'Max':>10}  {'Mem (Peak)':>22}  {'Rounds':>6}")
+        hdr = (
+            f"  {'Benchmark':<48} {'Mean':>10} {'Min':>10} {'Max':>10}  "
+            f"{'Mem (Peak)':>22}  {'Rounds':>6}"
+        )
+        print(hdr)
         print(f"  {'─' * 48} {'─' * 10} {'─' * 10} {'─' * 10}  {'─' * 22}  {'─' * 6}")
 
         for bm in group_benchmarks:

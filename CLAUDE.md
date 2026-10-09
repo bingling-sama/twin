@@ -103,15 +103,13 @@ Client uploads query.jpg
   └─ services/search.py: search(image)
       │
       ├─ [Stage 0: Prepare]
-      │   ├─ query_vec = compute_embedding(image)
-      │   │   └─ clip_model.encode_image() → torch → L2-normalize → (512,) float32
       │   ├─ query_dhash = compute_dhash(image) → imagehash.dhash() → 16-char hex
       │   └─ query_phash = compute_phash(image) → imagehash.phash() → 16-char hex
       │
       ├─ [Stage 1: Semantic Recall]
-      │   ├─ distances, ids = indexer.search(query_vec, k=50)
-      │   │   └─ faiss.IndexFlatL2 / IndexIVFFlat / IndexHNSWFlat.search() → L2 nearest neighbors
-      │   ├─ Build candidate pool: for each (dist, id) → load metadata
+      │   ├─ If rotation_invariant: compute_embeddings([0°, 90°, 180°, 270°]) → batch Faiss search + candidate pool merge
+      │   │  Else: query_vec = compute_embedding(image) → Faiss top-K
+      │   ├─ Build candidate pool: for each unique (dist, id) → load metadata
       │   └─ t1 = now; stages["faiss"] = {in:0, out:N, elapsed_ms: ...}
       │
       ├─ [Stage 2: dHash Filter]

@@ -20,7 +20,6 @@ import threading
 import time
 from typing import Any, Callable
 
-
 # ── tracemalloc (Python-level heap peak) ──────────────────────────────────────
 
 _tracemalloc_started: bool = False

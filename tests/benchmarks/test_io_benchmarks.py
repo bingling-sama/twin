@@ -11,7 +11,6 @@ import pytest
 
 from twin.utils.image import load_image, load_images
 
-
 # ── Single image load from disk ───────────────────────────────────────────────
 
 
@@ -34,8 +33,7 @@ def test_bench_load_image_jpg_224(benchmark, temp_image_dir):
 def test_bench_load_image_resolution(benchmark, temp_image_dir, resolution):
     """Benchmark: load images at various resolutions (PNG)."""
     path = next(
-        p for p in sorted(temp_image_dir.iterdir())
-        if resolution in p.name and p.suffix == ".png"
+        p for p in sorted(temp_image_dir.iterdir()) if resolution in p.name and p.suffix == ".png"
     )
     benchmark(load_image, str(path))
 
@@ -81,8 +79,7 @@ def test_bench_image_decode_resolution(benchmark, temp_image_dir, resolution):
     from PIL import Image
 
     path = next(
-        p for p in sorted(temp_image_dir.iterdir())
-        if resolution in p.name and p.suffix == ".jpg"
+        p for p in sorted(temp_image_dir.iterdir()) if resolution in p.name and p.suffix == ".jpg"
     )
     content = path.read_bytes()
 

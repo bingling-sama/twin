@@ -97,7 +97,7 @@ def plot_search_scaling(save: bool = False) -> None:
 
     # ── (a) Line chart: latency vs index size ──
     for name, latencies in data.items():
-        pts = [(s, l) for s, l in zip(sizes, latencies) if l is not None]
+        pts = [(s, lat) for s, lat in zip(sizes, latencies) if lat is not None]
         if len(pts) < 1:
             continue
         xs, ys = zip(*pts)
@@ -560,7 +560,7 @@ def plot_radar_decision_matrix(save: bool = False) -> None:
     """
     dimensions = ["Search\nSpeed", "Recall\nAccuracy", "Memory\nEfficiency",
                   "Scalability\n(log N)", "No Training\nNeeded"]
-    N = len(dimensions)
+    n_dim = len(dimensions)
 
     # Normalised scores (1-5 scale, higher = better) — informed by actual benchmark data
     # Recall@50 at default settings: Flat=1.0, IVF=0.33, IVFPQ=0.21, HNSW=0.59
@@ -569,7 +569,7 @@ def plot_radar_decision_matrix(save: bool = False) -> None:
     ivfpq_scores = [4, 1, 5, 5, 2]    # best memory+scale, worst recall at default nprobe
     hnsw_scores  = [3, 3, 1, 4, 5]    # good recall, no training, moderate speed
 
-    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+    angles = np.linspace(0, 2 * np.pi, n_dim, endpoint=False).tolist()
     angles += angles[:1]  # close the polygon
 
     fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"projection": "polar"})
@@ -621,15 +621,22 @@ def plot_summary(save: bool = False) -> None:
 
     # Key findings table
     findings = [
-        ("Search Speed (10K)",       "IVFFlat = fastest (61 μs)",  "IVFPQ only 15% slower (70 μs)"),
-        ("Scalability (100K)",        "IVFPQ = best (232 μs)",      "Flat = worst (4.9 ms, 21x slower)"),
-        ("Memory (1M vectors)",       "IVFPQ = 64 MB",              "Flat/IVF/HNSW = 2 GB (32x larger)"),
-        ("Training Cost (50K)",       "IVFFlat = 0.3s",             "IVFPQ = 6.3s (21x, one-time)"),
-        ("Pipeline Bottleneck",       "CLIP = 96.6% of latency",    "Faiss+dHash+pHash+SSIM = 3.4%"),
-        ("Best For <10K",             "IndexFlatL2",                "Exact search, zero training, 53 us @1K"),
-        ("Best For 10K-100K",         "IndexIVFFlat / IndexHNSWFlat", "Fast, no PQ overhead"),
-        ("Best For >100K",            "IndexIVFPQ",                 "Only viable option memory-wise, tune nprobe for recall"),
-        ("Best Recall @ Speed",       "IndexHNSWFlat (efSearch=128)", "80.7% recall at 429 us (1.3x slower than Flat, 4.8x faster than exact at scale)"),
+        ("Search Speed (10K)", "IVFFlat = fastest (61 μs)", "IVFPQ only 15% slower (70 μs)"),
+        ("Scalability (100K)", "IVFPQ = best (232 μs)", "Flat = worst (4.9 ms, 21x slower)"),
+        ("Memory (1M vectors)", "IVFPQ = 64 MB", "Flat/IVF/HNSW = 2 GB (32x larger)"),
+        ("Training Cost (50K)", "IVFFlat = 0.3s", "IVFPQ = 6.3s (21x, one-time)"),
+        ("Best For <10K", "IndexFlatL2", "Exact search, zero training, 53 us @1K"),
+        ("Best For 10K-100K", "IndexIVFFlat / IndexHNSWFlat", "Fast, no PQ overhead"),
+        (
+            "Best For >100K",
+            "IndexIVFPQ",
+            "Only viable option memory-wise, tune nprobe for recall",
+        ),
+        (
+            "Best Recall @ Speed",
+            "IndexHNSWFlat (efSearch=128)",
+            "80.7% recall at 429 us (1.3x slower than Flat, 4.8x faster than exact at scale)",
+        ),
     ]
 
     col_labels = ["Metric", "Winner / Value", "Context"]

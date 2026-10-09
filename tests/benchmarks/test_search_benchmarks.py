@@ -16,7 +16,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -174,7 +173,9 @@ def test_bench_search_dhash_threshold(benchmark, clip_model, dhash_threshold):
         return search(query, dhash_threshold=dhash_threshold)
 
     result = benchmark(_search)
-    benchmark.extra_info["dhash_survivors"] = result.get("stages", {}).get("dhash", {}).get("out", 0)
+    benchmark.extra_info["dhash_survivors"] = (
+        result.get("stages", {}).get("dhash", {}).get("out", 0)
+    )
 
     indexer.clear()
 
@@ -194,7 +195,9 @@ def test_bench_search_phash_threshold(benchmark, clip_model, phash_threshold):
         return search(query, phash_threshold=phash_threshold)
 
     result = benchmark(_search)
-    benchmark.extra_info["phash_survivors"] = result.get("stages", {}).get("phash", {}).get("out", 0)
+    benchmark.extra_info["phash_survivors"] = (
+        result.get("stages", {}).get("phash", {}).get("out", 0)
+    )
 
     indexer.clear()
 
@@ -217,7 +220,6 @@ def _build_pipeline_recall_index(
 
     Returns (query_images, base_filenames) for pipeline recall measurement.
     """
-    import shutil
     from pathlib import Path
 
     from tests.benchmarks.fixtures.synthetic import near_duplicate_pair, random_image
@@ -256,8 +258,9 @@ def _build_pipeline_recall_index(
 
     # Index near-duplicate base images, save queries
     for i in range(pair_count):
-        base_img, dup = near_duplicate_pair((224, 224), noise_level=noise_level,
-                                            seed=rng.randint(0, 2**31))
+        base_img, dup = near_duplicate_pair(
+            (224, 224), noise_level=noise_level, seed=rng.randint(0, 2**31)
+        )
         fname = f"base_{i:05d}.png"
         fpath = base / fname
         base_img.save(fpath)
@@ -290,7 +293,7 @@ def test_bench_pipeline_recall_flat(benchmark, clip_model):
     from twin.services.indexer import indexer
     from twin.services.search import search
 
-    n_random = 98   # 98 random + 2 base = 100 total
+    n_random = 98  # 98 random + 2 base = 100 total
     n_pairs = 2
     queries, base_names = _build_pipeline_recall_index(n_random, n_pairs)
 
@@ -315,18 +318,21 @@ def test_bench_pipeline_recall_flat(benchmark, clip_model):
 
 
 @pytest.mark.scaling
-@pytest.mark.parametrize("index_config", [
-    # (type, parameter, pq_cfg)
-    ("flat",       None, None),
-    ("ivf_flat",   8,    None),
-    ("ivf_flat",   16,   None),
-    ("ivf_flat",   32,   None),
-    ("ivf_pq",     8,    (64, 8)),
-    ("ivf_pq",     16,   (64, 8)),
-    ("ivf_pq",     32,   (64, 8)),
-    ("hnsw",       64,   None),
-    ("hnsw",       128,  None),
-])
+@pytest.mark.parametrize(
+    "index_config",
+    [
+        # (type, parameter, pq_cfg)
+        ("flat", None, None),
+        ("ivf_flat", 8, None),
+        ("ivf_flat", 16, None),
+        ("ivf_flat", 32, None),
+        ("ivf_pq", 8, (64, 8)),
+        ("ivf_pq", 16, (64, 8)),
+        ("ivf_pq", 32, (64, 8)),
+        ("hnsw", 64, None),
+        ("hnsw", 128, None),
+    ],
+)
 def test_bench_pipeline_recall_sweep(benchmark, clip_model, index_config):
     """Pipeline recall vs Faiss index type and parameters.
 
@@ -349,7 +355,7 @@ def test_bench_pipeline_recall_sweep(benchmark, clip_model, index_config):
     from twin.services.search import search
 
     idx_type, nprobe_or_ef, pq_cfg = index_config
-    n_random = 495   # 495 random + 5 base = 500 total — enough for IVF training
+    n_random = 495  # 495 random + 5 base = 500 total — enough for IVF training
     n_pairs = 5
     fixed_nlist = 4  # small nlist → training needs 4*39=156 vectors, 500 is plenty
 
@@ -385,8 +391,7 @@ def test_bench_pipeline_recall_sweep(benchmark, clip_model, index_config):
     queries = []
     base_names = []
     for i in range(n_pairs):
-        base_img, dup = near_duplicate_pair((224, 224), noise_level=5.0,
-                                            seed=rng.randint(0, 2**31))
+        base_img, dup = near_duplicate_pair((224, 224), noise_level=5.0, seed=rng.randint(0, 2**31))
         fname = f"base_{i:05d}.png"
         fpath = tmp_dir / fname
         base_img.save(fpath)
@@ -398,9 +403,7 @@ def test_bench_pipeline_recall_sweep(benchmark, clip_model, index_config):
         base_names.append(fname)
 
     # Compute CLIP embeddings
-    embeddings = np.stack(
-        [compute_embedding(img) for img in all_images], axis=0
-    ).astype(np.float32)
+    embeddings = np.stack([compute_embedding(img) for img in all_images], axis=0).astype(np.float32)
 
     # Compute hashes
     dhashes = [compute_dhash(img) for img in all_images]
