@@ -107,8 +107,36 @@ export interface BatchIndexResult {
   time_ms: number;
 }
 
+export interface BatchTaskStatus {
+  status: "started" | "running" | "completed" | "failed" | string;
+  task_id: string;
+  directory: string;
+  total: number;
+  indexed: number;
+  failed: number;
+  skipped: number;
+  current_batch: number;
+  total_batches: number;
+  progress_pct: number;
+  elapsed_ms: number;
+  eta_ms: number;
+  rate_img_per_s: number;
+  time_ms: number;
+  error?: string | null;
+}
+
 export async function indexBatch(directory: string): Promise<BatchIndexResult> {
-  const { data } = await api.post<BatchIndexResult>("/index/batch", { directory });
+  const { data } = await api.post<BatchIndexResult>("/index/batch", { directory, async_mode: false });
+  return data;
+}
+
+export async function indexBatchAsync(directory: string): Promise<BatchTaskStatus> {
+  const { data } = await api.post<BatchTaskStatus>("/index/batch", { directory, async_mode: true });
+  return data;
+}
+
+export async function getBatchTaskStatus(taskId: string): Promise<BatchTaskStatus> {
+  const { data } = await api.get<BatchTaskStatus>(`/index/batch/status/${encodeURIComponent(taskId)}`);
   return data;
 }
 

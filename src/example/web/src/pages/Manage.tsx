@@ -8,11 +8,14 @@ import {
   setGpuEnabled,
   indexImage,
   indexBatch,
+  indexBatchAsync,
+  getBatchTaskStatus,
   clearIndex,
   trainIndex,
   type HealthData,
   type SyncStatus,
   type BatchStatus,
+  type BatchTaskStatus,
   type RebuildStatus,
   type RuntimeConfig,
   type IndexStatus,
@@ -103,19 +106,60 @@ export default function Manage() {
   async function handleBatch() {
     if (!directory.trim()) { setError("Enter a directory path."); return; }
     setLoading(true); setError(null); setResult(null);
-    // Seed batch status so polling starts immediately
-    setBatchStatus({ running: true, total: 0, indexed: 0, failed: 0, current_batch: 0, total_batches: 0, progress_pct: 0, elapsed_ms: 0, eta_ms: 0, rate_img_per_s: 0 });
+    setBatchStatus({
+      running: true,
+      total: 0,
+      indexed: 0,
+      failed: 0,
+      current_batch: 0,
+      total_batches: 0,
+      progress_pct: 0,
+      elapsed_ms: 0,
+      eta_ms: 0,
+      rate_img_per_s: 0,
+    });
+
     try {
-      const batchPromise = indexBatch(directory.trim());
-      // Give the backend a tick to initialise _batch_state
-      await new Promise(r => setTimeout(r, 100));
-      const initial = await getBatchStatus();
-      setBatchStatus(initial);
-      setResult(await batchPromise);
-      refreshHealth();
+      const task = await indexBatchAsync(directory.trim());
+      const taskId = task.task_id;
+
+      while (true) {
+        await new Promise((r) => setTimeout(r, 400));
+        const st: BatchTaskStatus = await getBatchTaskStatus(taskId);
+
+        setBatchStatus({
+          running: st.status === "started" || st.status === "running",
+          total: st.total,
+          indexed: st.indexed,
+          failed: st.failed,
+          current_batch: st.current_batch ?? 0,
+          total_batches: st.total_batches ?? 0,
+          progress_pct: st.progress_pct,
+          elapsed_ms: st.elapsed_ms || st.time_ms || 0,
+          eta_ms: st.eta_ms || 0,
+          rate_img_per_s: st.rate_img_per_s || 0,
+        });
+
+        if (st.status === "completed") {
+          setResult({
+            status: "completed",
+            total: st.total,
+            indexed: st.indexed,
+            failed: st.failed,
+            time_ms: st.time_ms || st.elapsed_ms || 0,
+          });
+          refreshHealth();
+          break;
+        } else if (st.status === "failed") {
+          throw new Error(st.error || "Batch indexing failed");
+        }
+      }
+    } catch (e: any) {
+      setError(e.response?.data?.detail ?? e.message);
+    } finally {
+      setLoading(false);
+      setBatchStatus(null);
     }
-    catch (e: any) { setError(e.response?.data?.detail ?? e.message); }
-    finally { setLoading(false); setBatchStatus(null); }
   }
 
   async function handleClear() {

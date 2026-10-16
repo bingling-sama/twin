@@ -58,7 +58,12 @@ class BatchIndexAsyncResponse(BaseModel):
     indexed: int = 0
     failed: int = 0
     skipped: int = 0
+    current_batch: int = 0
+    total_batches: int = 0
     progress_pct: float = 0.0
+    elapsed_ms: float = 0.0
+    eta_ms: float = 0.0
+    rate_img_per_s: float = 0.0
     time_ms: float = 0.0
     error: str | None = None
 
