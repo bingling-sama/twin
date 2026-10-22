@@ -36,18 +36,28 @@ Runtime GPU detection is automatic: if `faiss-gpu` is available（`faiss.get_num
 
 ## API Endpoints
 
-| Method   | Path                                  | Description                                               |
-| -------- | ------------------------------------- | --------------------------------------------------------- |
-| `GET`    | `/api/v1/health`                      | Indexed count + model status                              |
-| `POST`   | `/api/v1/search`                      | Upload image → find similar/duplicates                    |
-| `POST`   | `/api/v1/search/text`                 | `{"query": "text prompt", "k": 50}` → text-to-image search |
-| `POST`   | `/api/v1/index`                       | Upload single image → add to index                        |
-| `POST`   | `/api/v1/index/batch`                 | `{"directory": "/path"}` → index all images (sync/async)  |
-| `GET`    | `/api/v1/index/batch/status/{task_id}`| Live/completed status for async batch indexing task       |
-| `GET`    | `/api/v1/index`                       | Paginated list of indexed images (`?page=1&page_size=50`) |
-| `GET`    | `/api/v1/images/{filename}`           | Serve image file for preview thumbnails                   |
-| `DELETE` | `/api/v1/index`                       | Clear entire index                                        |
-| `GET`    | `/api/v1/sync/status`                 | Background sync progress, ETA, and completion status      |
+| Method   | Path                                           | Description                                                 |
+| -------- | ---------------------------------------------- | ----------------------------------------------------------- |
+| `GET`    | `/api/v1/health`                               | Indexed count + active model / GPU runtime status           |
+| `POST`   | `/api/v1/search`                               | Upload image → find similar/duplicates                      |
+| `POST`   | `/api/v1/search/text`                          | `{"query": "text prompt", "k": 50}` → text-to-image search   |
+| `POST`   | `/api/v1/index`                                | Upload single image → add to index                          |
+| `POST`   | `/api/v1/index/batch`                          | `{"directory": "/path", "async_mode": true}` → index images |
+| `GET`    | `/api/v1/index/batch/status`                   | Snapshot of latest batch indexing progress                  |
+| `GET`    | `/api/v1/index/batch/status/{task_id}`         | Snapshot for specific async batch indexing task             |
+| `GET`    | `/api/v1/index/batch/status/{task_id}/stream`  | SSE real-time stream of async batch indexing progress       |
+| `GET`    | `/api/v1/index/batch/status/stream`            | SSE stream of global batch indexing progress                |
+| `GET`    | `/api/v1/index/rebuild/status`                 | Status of in-progress index rebuild                         |
+| `GET`    | `/api/v1/index/rebuild/status/stream`          | SSE stream of index rebuild progress                        |
+| `GET`    | `/api/v1/index`                                | Paginated list of indexed images (`?page=1&page_size=50`)   |
+| `GET`    | `/api/v1/images/{filename}`                    | Serve image file for preview thumbnails                     |
+| `DELETE` | `/api/v1/index`                                | Clear entire index                                          |
+| `POST`   | `/api/v1/index/gpu`                            | Toggle Faiss GPU acceleration (`{"enabled": true/false}`)   |
+| `POST`   | `/api/v1/index/train`                          | Force train/upgrade Faiss index to IVF                      |
+| `GET`    | `/api/v1/sync/status`                          | Background sync progress, ETA, and completion status        |
+| `GET`    | `/api/v1/sync/status/stream`                   | SSE stream of background sync progress                      |
+| `GET`    | `/api/v1/config`                               | View dynamic runtime configuration snapshot                 |
+| `PATCH`  | `/api/v1/config`                               | Update runtime configuration (index type, batch size, etc.) |
 
 ## Examples
 
@@ -93,7 +103,7 @@ curl "http://localhost:8000/api/v1/index?page=1&page_size=20"
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      HTTP Layer (api/)                       │
-│  routes.py — thin handlers, 7 endpoints, 0 business logic   │
+│  routes.py — thin handlers, thin endpoints, 0 business logic│
 │  schemas.py — Pydantic v2 request/response validation       │
 └───────────────┬───────────────────────────────┬─────────────┘
                 │                               │
@@ -102,30 +112,33 @@ curl "http://localhost:8000/api/v1/index?page=1&page_size=20"
     │   (orchestration)      │     │   (computation)          │
     │                        │     │                          │
     │  search.py             │     │  embedding.py            │
-    │  ├─ Stage 1: Faiss     │     │  ├─ CLIP → 512d vector  │
+    │  ├─ Stage 1: Faiss     │     │  ├─ CLIP / DINOv2 vector │
     │  ├─ Stage 2: dHash     │     │  └─ batch encode        │
     │  ├─ Stage 3: pHash     │     │                          │
     │  └─ Stage 4: SSIM      │     │  hasher.py               │
-    │                        │     │  ├─ dHash / pHash        │
-    │  index_service.py      │     │  ├─ SSIM (skimage)       │
+    │                        │     │  ├─ aHash / dHash / pHash│
+    │  index_service.py      │     │  ├─ SSIM (CUDA/skimage)  │
     │  ├─ index_single()     │     │  └─ Hamming distance     │
-    │  └─ index_batch()      │     │                          │
-    │                        │     │  indexer.py              │
-    │  sync.py               │     │  ├─ Faiss IndexFlatL2    │
-    │  └─ startup auto-sync  │     │  └─ metadata + persist   │
-    └───────────┬────────────┘     └────────────┬─────────────┘
+    │  ├─ index_batch()      │     │                          │
+    │  └─ preloading pipeline│     │  indexer.py              │
+    │                        │     │  ├─ Faiss Flat/IVF/HNSW  │
+    │  sync.py               │     │  └─ metadata + persist   │
+    │  ├─ startup auto-sync  │     └────────────┬─────────────┘
+    │  └─ preloading pipeline│                  │
+    └───────────┬────────────┘                  │
                 │                               │
     ┌───────────▼───────────────────────────────▼─────────────┐
     │                    Domain Layer                          │
     │                                                         │
-    │  models/clip_model.py    core/config.py                 │
-    │  ├─ load() idempotent    ├─ TWIN_ env vars              │
-    │  ├─ encode_image()       ├─ path resolution              │
-    │  └─ encode_images()      └─ settings singleton          │
+    │  models/clip_model.py    models/dinov2_model.py         │
+    │  ├─ load() idempotent    ├─ load() idempotent           │
+    │  ├─ encode_image(s)      ├─ encode_image(s)             │
+    │  └─ encode_text()        └─ PyTorch vision transformer  │
     │                                                         │
-    │  utils/image.py                                         │
-    │  ├─ load_image() / load_images()                        │
-    │  └─ IMAGE_EXTENSIONS                                    │
+    │  core/config.py          utils/metrics.py               │
+    │  ├─ TWIN_ env vars       └─ rolling rate / ETA metrics  │
+    │  └─ settings singleton   utils/image.py                 │
+    │                          └─ load_images() parallel I/O  │
     └─────────────────────────────────────────────────────────┘
 ```
 
@@ -227,42 +240,48 @@ POST /api/v1/index                    POST /api/v1/index/batch
 ### Project Structure
 
 ```
-src/twin/
-├── main.py                    # FastAPI app, CORS, lifespan (model→index→sync→auto-save)
-├── core/
-│   └── config.py              # TWIN_ env vars, path resolution, ensure_dirs()
-├── models/
-│   └── clip_model.py          # CLIP singleton, encode_image(), encode_images()
-├── services/
-│   ├── embedding.py           # compute_embedding(), compute_embeddings()
-│   ├── hasher.py              # dHash, pHash, SSIM, Hamming distance
-│   ├── indexer.py             # Faiss Flat / IVF / HNSW + metadata + auto-save thread
-│   ├── index_service.py       # index_single(), index_batch() workflows
-│   ├── search.py              # 2-stage + 4-filter funnel orchestrator
-│   └── sync.py                # Startup: scan images dir, batch-index missing
-├── api/
-│   ├── routes.py              # 7 endpoints — thin HTTP handlers
-│   └── schemas.py             # Pydantic v2 request/response models
-└── utils/
-    └── image.py               # load_image(), load_images(), IMAGE_EXTENSIONS
-
-tests/
-├── conftest.py                # OMP env vars
-├── test_api.py                # Integration tests (7 endpoints)
-├── test_embedding.py          # CLIP embedding tests
-├── test_hasher.py             # dHash/pHash/SSIM tests
-└── test_indexer.py            # Faiss indexer unit tests
-
-src/example/web/               # React frontend (Vite)
-├── src/
-│   ├── App.jsx                # Tab layout (Search | Browse | Manage)
-│   ├── api/twin.js            # Axios API client
-│   ├── pages/
-│   │   ├── Search.jsx         # Drag-drop upload + zoomable results
-│   │   ├── Browse.jsx         # Paginated thumbnail gallery
-│   │   └── Manage.jsx         # Health status + index controls
-│   └── index.css              # MongoDB-inspired design tokens
-└── vite.config.js             # Proxy /api/v1 → localhost:8000
+.
+├── dev.ps1                    # Native Windows concurrent dev script (FastAPI + Vite)
+├── src/twin/
+│   ├── main.py                # FastAPI app, CORS, lifespan (model→index→sync→auto-save)
+│   ├── core/
+│   │   └── config.py          # TWIN_ env vars, path resolution, ensure_dirs()
+│   ├── models/
+│   │   ├── clip_model.py      # CLIP singleton, encode_image(s), encode_text()
+│   │   └── dinov2_model.py    # DINOv2 vision transformer singleton
+│   ├── services/
+│   │   ├── embedding.py       # Multi-model embedding abstraction (CLIP / DINOv2)
+│   │   ├── hasher.py          # aHash, dHash, pHash, SSIM (PyTorch CUDA / skimage)
+│   │   ├── indexer.py         # Faiss Flat / IVF / HNSW + metadata + auto-save thread
+│   │   ├── index_service.py   # index_single, async index_batch, double-buffering preloader
+│   │   ├── search.py          # 2-stage + 4-filter funnel orchestrator + text search
+│   │   └── sync.py            # Startup auto-sync with double-buffering preloader
+│   ├── api/
+│   │   ├── routes.py          # REST & SSE streaming endpoints
+│   │   └── schemas.py         # Pydantic v2 request/response models
+│   └── utils/
+│       ├── image.py           # Parallel load_images(), formats, validation
+│       └── metrics.py         # Progress metrics, rolling rate, ETA calculation
+│
+├── tests/
+│   ├── conftest.py            # Fixtures & env setup
+│   ├── benchmarks/            # Comprehensive benchmark suite (CLIP, DINOv2, Faiss, SSIM, I/O)
+│   ├── test_api.py            # Integration tests for core endpoints
+│   ├── test_concurrency_tasks.py # Async task LRU, isolation, and preload resilience tests
+│   ├── test_dinov2.py         # DINOv2 model tests
+│   ├── test_rotation_search.py# Rotation invariance tests
+│   └── ...                    # Service & router unit tests
+│
+└── src/example/web/           # React frontend (Vite + TypeScript)
+    ├── src/
+    │   ├── App.tsx            # Tab layout (Search | Browse | Manage)
+    │   ├── api/twin.ts        # Typed Axios API client
+    │   ├── pages/
+    │   │   ├── Search.tsx     # Image & text multi-modal search + zoom preview
+    │   │   ├── Browse.tsx     # Paginated thumbnail gallery
+    │   │   └── Manage.tsx     # Live status, SSE task progress, and runtime config
+    │   └── index.css          # Design tokens (Euclid Circular A, pill buttons)
+    └── vite.config.ts         # Proxy /api/v1 → localhost:8000
 ```
 
 ## Configuration
@@ -271,23 +290,28 @@ Set via environment variables with `TWIN_` prefix (or `.env` file):
 
 | Variable                  | Default       | Description                                                         |
 | ------------------------- | ------------- | ------------------------------------------------------------------- |
+| `TWIN_MODEL_TYPE`         | `clip`        | Embedding model architecture (`clip` or `dinov2`)                  |
 | `TWIN_MODEL_NAME`         | `ViT-B-32`    | CLIP model variant                                                  |
-| `TWIN_PRETRAINED`         | `openai`      | Pretrained weights tag                                              |
+| `TWIN_PRETRAINED`         | `openai`      | Pretrained weights tag for CLIP                                     |
+| `TWIN_DINOV2_MODEL_NAME`  | `vit_small_patch14_dinov2` | DINOv2 model architecture name                        |
 | `TWIN_DEVICE`             | (auto)        | `cuda`, `mps`, `cpu`, or empty for auto-detect                      |
-| `TWIN_TOP_K`              | `50`          | Faiss candidates to retrieve                                        |
+| `TWIN_TOP_K`              | `100`         | Faiss candidates to retrieve                                        |
 | `TWIN_DHASH_THRESHOLD`    | `10`          | Max dHash Hamming distance for match                                |
 | `TWIN_PHASH_THRESHOLD`    | `12`          | Max pHash Hamming distance for match                                |
 | `TWIN_SSIM_THRESHOLD`     | `0.90`        | Min SSIM for structural match                                       |
-| `TWIN_BATCH_SIZE`         | `32`          | Images per CLIP forward pass                                        |
-| `TWIN_AUTO_SAVE_INTERVAL` | `300`         | Seconds between auto-saves (0=disable)                              |
-| `TWIN_FAISS_INDEX_TYPE`              | `ivf_flat`    | Faiss index type: `flat`, `ivf_flat`, or `hnsw` (IndexHNSWFlat) |
+| `TWIN_SSIM_DEVICE`        | (auto)        | SSIM compute device (`cuda`, `mps`, `cpu`, or empty for auto)       |
+| `TWIN_SSIM_SIZE`          | `256`         | Resolution for SSIM grayscale comparison (N×N)                      |
+| `TWIN_ROTATION_INVARIANT` | `false`       | Tolerates 90°/180°/270° orthogonal image rotations                 |
+| `TWIN_BATCH_SIZE`         | `64`          | Images per forward pass / I/O batch                                 |
+| `TWIN_AUTO_SAVE_INTERVAL` | `120`         | Seconds between auto-saves (0=disable)                              |
+| `TWIN_FAISS_INDEX_TYPE`              | `ivf_flat`    | Faiss index type: `flat`, `ivf_flat`, `ivf_pq`, or `hnsw`       |
 | `TWIN_FAISS_NLIST`                   | `0`           | IVF cluster count; 0 = auto (`4 * sqrt(N)`)                   |
-| `TWIN_FAISS_NPROBE`                  | `8`           | IVF search-time probe count; higher = more recall              |
+| `TWIN_FAISS_NPROBE`                  | `16`          | IVF search-time probe count; higher = more recall              |
 | `TWIN_FAISS_AUTO_UPGRADE`            | `true`        | Auto-convert Flat→IVF when enough vectors accumulated         |
 | `TWIN_FAISS_GPU`                     | `true`        | Try GPU Faiss if CUDA available (requires `faiss-gpu`; ignored for HNSW) |
 | `TWIN_FAISS_HNSW_M`                  | `32`          | HNSW graph degree (4–64)                                       |
 | `TWIN_FAISS_HNSW_EF_CONSTRUCTION`    | `200`         | HNSW build-time exploration depth (100–2000)                   |
-| `TWIN_FAISS_HNSW_EF_SEARCH`          | `64`          | HNSW search-time depth; higher = more recall                   |
+| `TWIN_FAISS_HNSW_EF_SEARCH`          | `128`         | HNSW search-time depth; higher = more recall                   |
 | `TWIN_SYNC_ON_STARTUP`               | `false`       | Block startup until sync completes; `false` = background thread |
 | `TWIN_INDEX_PATH`                    | `data`        | Faiss index storage directory                                  |
 | `TWIN_IMAGES_DIR`                    | `data/images` | Source images directory (auto-synced on startup)               |
@@ -330,6 +354,8 @@ Items mapped to recommendations from [图像检索方案技术研究](./图像�
 | 18  | **Async Batch Indexing** — Background task manager with `GET /index/batch/status/{task_id}` | § 背景任务                  |
 | 19  | **DINOv2 embedding** — `TWIN_MODEL_TYPE=dinov2` via timm/PyTorch Vision Transformers       | § 嵌入模型的选择, Table: DINOv2 |
 | 20  | **CUDA SSIM** — GPU-accelerate PyTorch 2D Convolution SSIM computation with auto-fallback | § 硬件原生的异构计算         |
+| 21  | **Pipelined Double-Buffering** — Overlap disk I/O and GPU inference in indexing and startup sync (+19.6% throughput) | § 生产级项目结构与性能瓶颈 |
+| 22  | **Task SSE Progress Streaming** — Real-time event streams (`/sync/status/stream`, `/index/batch/status/{task_id}/stream`) with live ETA | § 大文件上传与存储管道优化 |
 
 ### High Priority 🔴
 
@@ -342,7 +368,6 @@ All high priority engineering items have been implemented and verified. ✅
 | 1   | **Adaptive thresholds** — ML-driven threshold tuning per image domain (anime, photo, document)       | § 自适应阈值学习                            | Replaces hardcoded `TWIN_DHASH_THRESHOLD` etc.                                |
 | 2   | **Preprocessing pipeline** — configurable interpolation (`INTER_AREA`, `INTER_CUBIC`), CIELab option | § 图像预处理对检索一致性的影响                     | PIL currently delegates to defaults; OpenCV `INTER_AREA` yields better hashes |
 | 3   | **Distributed sharding** — manual shard routing or migrate to Milvus / Qdrant / pgvector             | § 扩展性：Faiss 与 purpose-built 向量数据库的博弈 | Beyond single-machine scope; relevant at 10M+ images                          |
-| 4   | **Batch progress streaming** — SSE/WebSocket for real-time progress during large indexing jobs       | § 大文件上传与存储管道优化                       | In-process background tasks available, SSE frontend integration pending       |
 
 ## Run Tests
 

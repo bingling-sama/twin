@@ -287,37 +287,41 @@ sync.py (startup)
 ### Architecture Layers
 
 ```
-HTTP Layer     api/routes.py  ──→  8 thin endpoints, delegates to services
+HTTP Layer     api/routes.py  ──→  Thin REST & SSE endpoints, delegates to services
                api/schemas.py ──→  Pydantic v2 validation
                     │
-Orchestration   search.py      ──→  2-stage + 4-filter funnel
-               index_service.py ──→  index_single(), index_batch() workflows
-               sync.py        ──→  startup auto-sync from images dir
+Orchestration   search.py      ──→  2-stage + 4-filter funnel & text search
+               index_service.py ──→  index_single(), async index_batch(), double-buffering preloader
+               sync.py        ──→  startup auto-sync with double-buffering preloader
                     │
-Computation     embedding.py   ──→  CLIP → 512d float32 vectors (single + batch)
-               hasher.py      ──→  dHash, pHash, SSIM, Hamming distance
-               indexer.py     ──→  Faiss IndexFlatL2 / IndexIVFFlat / IndexHNSWFlat + metadata + auto-save
+Computation     embedding.py   ──→  CLIP / DINOv2 float32 vectors (single + batch)
+               hasher.py      ──→  aHash, dHash, pHash, SSIM (PyTorch CUDA / skimage), Hamming
+               indexer.py     ──→  Faiss IndexFlatL2 / IndexIVFFlat / IndexIVFPQ / IndexHNSWFlat + metadata + auto-save
                     │
 Domain          clip_model.py  ──→  CLIP singleton, CUDA/MPS/CPU auto-detect
+               dinov2_model.py ──→  DINOv2 vision transformer singleton
                config.py      ──→  TWIN_ env vars, path resolution
-               utils/image.py ──→  shared image I/O utilities
+               utils/image.py ──→  shared parallel image I/O utilities
+               utils/metrics.py──→  rolling throughput rate & ETA metrics
 ```
 
 ### Component Map
 
 | Layer | Module | Role |
 |-------|--------|------|
-| **HTTP** | `api/routes.py` | 8 endpoints — thin handlers, 0 business logic. Delegates to `search()`, `index_service`, `indexer`, `get_sync_status()` |
-| HTTP | `api/schemas.py` | Pydantic v2 models: SearchResultItem, SearchResponse, IndexStatus, BatchIndexResponse, etc. |
-| **Service** | `services/search.py` | Orchestrator: CLIP → Faiss → dHash → pHash → SSIM funnel. Returns tiered results + per-stage timing |
-| Service | `services/index_service.py` | Encapsulates index workflows: `index_single()`, `index_batch()`, `_index_single_from_disk()`. Shared by routes and sync |
-| Service | `services/sync.py` | Startup sync: scans images dir, batch-indexes files not yet in index. Tracks progress in thread-safe `_sync_state` (exposed via `get_sync_status()`). Reuses `_index_single_from_disk()` for fallback |
-| Service | `services/embedding.py` | `compute_embedding()` + `compute_embeddings()` — thin wrapper around clip_model |
-| Service | `services/hasher.py` | dHash, pHash (imagehash), SSIM (skimage), Hamming distance. Batch+parallel variants |
-| Service | `services/indexer.py` | Faiss IndexFlatL2 / IndexIVFFlat / IndexHNSWFlat + JSON metadata, thread-safe (threading.RLock), auto-save daemon thread with dirty flag |
-| **Domain** | `models/clip_model.py` | Singleton. `load()` idempotent, `encode_image()` + `encode_images()`. Auto-detects CUDA > MPS > CPU |
+| **HTTP** | `api/routes.py` | REST & SSE endpoints — thin handlers, 0 business logic. Delegates to `search()`, `search_by_text()`, `index_service`, `indexer`, `get_sync_status()` |
+| HTTP | `api/schemas.py` | Pydantic v2 models: SearchResultItem, SearchResponse, TextSearchResponse, BatchIndexAsyncResponse, HealthResponse, etc. |
+| **Service** | `services/search.py` | Orchestrator: CLIP/DINOv2 → Faiss → dHash → pHash → SSIM funnel + text-to-image search. Returns tiered results + per-stage timing |
+| Service | `services/index_service.py` | Encapsulates index workflows: `index_single()`, `index_batch_async()`, `index_batch()`, double-buffering preloader, and LRU task state |
+| Service | `services/sync.py` | Startup sync: scans images dir, batch-indexes files not yet in index with double-buffering preloader. Tracks progress in thread-safe `_sync_state` |
+| Service | `services/embedding.py` | Multi-model embedding abstraction for CLIP and DINOv2 |
+| Service | `services/hasher.py` | aHash, dHash, pHash (imagehash), SSIM (PyTorch CUDA / skimage), Hamming distance. Batch + parallel variants |
+| Service | `services/indexer.py` | Faiss Flat / IVF / PQ / HNSW + JSON metadata, thread-safe (threading.RLock), auto-save daemon thread with dirty flag |
+| **Domain** | `models/clip_model.py` | Singleton. `load()` idempotent, `encode_image()`, `encode_images()`, `encode_text()`. Auto-detects CUDA > MPS > CPU |
+| Domain | `models/dinov2_model.py` | Singleton. DINOv2 vision transformer via timm / PyTorch |
 | Domain | `core/config.py` | `BaseSettings` with `TWIN_` prefix. Paths resolved against project root. `ensure_dirs()` called at startup |
-| Domain | `utils/image.py` | Shared `load_image()`, `load_images()`, `iter_image_files()`, `IMAGE_EXTENSIONS` |
+| Domain | `utils/image.py` | Shared `load_image()`, parallel `load_images()`, `IMAGE_EXTENSIONS` |
+| Domain | `utils/metrics.py` | Shared `compute_progress_metrics()`: rolling window throughput rate, progress percentage, ETA |
 
 ### Data Flow (Search)
 
@@ -452,14 +456,19 @@ POST /api/v1/index/batch (directory)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TWIN_MODEL_TYPE` | `clip` | Embedding model architecture (`clip` or `dinov2`) |
 | `TWIN_MODEL_NAME` | `ViT-B-32` | CLIP variant |
-| `TWIN_PRETRAINED` | `openai` | Weights tag |
+| `TWIN_PRETRAINED` | `openai` | CLIP weights tag |
+| `TWIN_DINOV2_MODEL_NAME` | `vit_small_patch14_dinov2` | DINOv2 model architecture name |
 | `TWIN_DEVICE` | (auto) | `cuda` / `mps` / `cpu` |
 | `TWIN_TOP_K` | `100` | Faiss candidates |
 | `TWIN_DHASH_THRESHOLD` | `10` | dHash Hamming threshold |
 | `TWIN_PHASH_THRESHOLD` | `12` | pHash Hamming threshold |
 | `TWIN_SSIM_THRESHOLD` | `0.90` | SSIM threshold |
-| `TWIN_FAISS_INDEX_TYPE` | `ivf_flat` | `flat` / `ivf_flat` / `hnsw` |
+| `TWIN_SSIM_DEVICE` | (auto) | SSIM compute device (`cuda` / `mps` / `cpu`) |
+| `TWIN_SSIM_SIZE` | `256` | SSIM comparison resolution |
+| `TWIN_ROTATION_INVARIANT` | `false` | 90°/180°/270° orthogonal orientation tolerance |
+| `TWIN_FAISS_INDEX_TYPE` | `ivf_flat` | `flat` / `ivf_flat` / `ivf_pq` / `hnsw` |
 | `TWIN_FAISS_NLIST` | `0` | IVF centroids (0=auto) |
 | `TWIN_FAISS_NPROBE` | `16` | IVF search probes |
 | `TWIN_FAISS_AUTO_UPGRADE` | `true` | Auto Flat→IVF upgrade |
@@ -467,53 +476,43 @@ POST /api/v1/index/batch (directory)
 | `TWIN_FAISS_HNSW_M` | `32` | HNSW graph degree (4–64) |
 | `TWIN_FAISS_HNSW_EF_CONSTRUCTION` | `200` | HNSW build-time depth |
 | `TWIN_FAISS_HNSW_EF_SEARCH` | `128` | HNSW search-time depth |
-| `TWIN_BATCH_SIZE` | `64` | Images per CLIP batch |
+| `TWIN_BATCH_SIZE` | `64` | Images per forward pass / batch |
 | `TWIN_AUTO_SAVE_INTERVAL` | `120` | Auto-save seconds |
 | `TWIN_SYNC_ON_STARTUP` | `false` | Block startup until sync done |
 | `TWIN_INDEX_PATH` | `data` | Index storage dir |
 | `TWIN_IMAGES_DIR` | `data/images` | Source images dir |
 
-### Critical Gotcha: OpenMP on macOS
+### Critical Gotcha: OpenMP on macOS & Windows
 
-Torch and faiss-cpu each link `libomp`. Loading both in one process causes `OMP: Error #15`. Workaround: set `OMP_NUM_THREADS=1 KMP_DUPLICATE_LIB_OK=TRUE` before launching. `main.py` and `conftest.py` call `os.environ.setdefault()` for these, but they must be set **before** the Python interpreter imports torch/faiss — hence still passed as shell env vars.
+Torch and faiss-cpu each link `libomp`. Loading both in one process causes `OMP: Error #15`. Workaround: set `OMP_NUM_THREADS=1 KMP_DUPLICATE_LIB_OK=TRUE` before launching. `main.py`, `conftest.py`, and `dev.ps1` configure these automatically.
 
 ## Performance
 
-### Indexing Pipeline — Threading Model
+### Indexing Pipeline — Double-Buffering Preload Model
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │       索引流水线 (per batch, 32 images)    │
-                    │                                          │
-image files ───────►│ load_images()    串行 PIL I/O             │
-                    │       │                                  │
-                    │       ▼                                  │
-                    │ CLIP encode      单次 GPU forward         │
-                    │ (batch=32)       torch.set_num_threads(1)│
-                    │       │                                  │
-                    │       ├──────────┬──────────┐            │
-                    │       ▼          ▼          ▼            │
-                    │    dHash       pHash      ...             │
-                    │  ThreadPool   ThreadPool                 │
-                    │  workers=8    workers=8                  │
-                    │       │          │                       │
-                    │       └──────────┘                       │
-                    │              │                            │
-                    │              ▼                            │
-                    │       Faiss add                          │
-                    │       RLock 串行                         │
-                    │       (0.19ms / 32 vectors)              │
-                    └──────────────────────────────────────────┘
+                    ┌────────────────────────────────────────────────────────┐
+                    │          双缓冲流水线 (Double-Buffering Pipeline)        │
+                    │                                                        │
+                    │  Batch N (GPU Compute)      Batch N+1 (I/O Preload)    │
+                    │  ┌──────────────────────┐   ┌───────────────────────┐  │
+                    │  │ CLIP/DINOv2 encode   │   │ ThreadPoolExecutor    │  │
+                    │  │ aHash + dHash + pHash│   │ load_images(batch_N+1)│  │
+                    │  │ Faiss RLock add_items│   │ decode PIL in bg      │  │
+                    │  └──────────────────────┘   └───────────────────────┘  │
+                    │              ▲                          │              │
+                    │              └──────────────────────────┘              │
+                    │             (Overlapped I/O hides behind compute)      │
+                    └────────────────────────────────────────────────────────┘
 ```
 
 | Stage | Concurrency | Mechanism | Bottleneck? |
 |-------|------------|-----------|-------------|
-| Image I/O (`load_images`) | Serial | `for` loop over paths | 🟡 ~32ms/batch, 30% of total |
-| CLIP encode (`encode_images`) | Single GPU forward | `torch.set_num_threads(1)` | 🔴 ~70ms/batch, 67% — **dominant** |
-| dHash (`compute_dhashes`) | Parallel | `ThreadPoolExecutor(max_workers=8)` | 🟢 ~0.9ms/batch |
-| pHash (`compute_phashes`) | Parallel | `ThreadPoolExecutor(max_workers=8)` | 🟢 ~1.8ms/batch |
+| Image I/O (`load_images`) | Overlapped | Background `ThreadPoolExecutor(max_workers=1)` double-buffering preloader | 🟢 Overlapped behind GPU compute |
+| Forward pass (`compute_embeddings`) | Single GPU forward | CLIP / DINOv2 (`torch.set_num_threads(1)`) | 🔴 ~70ms/batch (dominant) |
+| Hashing (`compute_*hashes`) | Parallel | `ThreadPoolExecutor(max_workers=8)` for aHash/dHash/pHash | 🟢 ~2.5ms/batch |
 | Faiss add (`add_items`) | Serial | `threading.RLock` | 🟢 ~0.2ms/batch |
-| SSIM (search funnel) | Serial | `for` loop, 2–5 candidates | 🟢 not on indexing path |
+| SSIM (search funnel) | Serial / GPU | skimage CPU or PyTorch CUDA conv2d | 🟢 not on indexing path |
 | Auto-save | Background | Independent daemon thread | 🟢 async, non-blocking |
 
 ### Per-Batch Time Budget (batch_size=32, ViT-B-32, GPU)
@@ -533,14 +532,10 @@ Single-image latency (index_single): 24.65 ms (CLIP + dHash + pHash + Faiss, no 
 
 ### Optimization Priorities
 
-All measured against the current ~305 img/s baseline (batch_size=32, ViT-B-32, GPU).
-
-| Priority | Change | Expected Gain | Rationale |
-|----------|--------|---------------|-----------|
-| **P0** | Parallelize image I/O with `ThreadPoolExecutor` | 305 → ~400 img/s | 30% of batch time is serial PIL decode; 8 workers would cut it to ~5ms |
-| **P1** | Increase `TWIN_BATCH_SIZE` to 128 | 305 → ~360 img/s | Better GPU utilization; CLIP forward is sub-linear in batch size (64 is now default) |
-| **P2** | Pipeline: preload batch N+1 while encoding batch N | 305 → ~380 img/s | Overlaps I/O wait with GPU compute; requires double-buffering |
-| **P3** | GPU Faiss for indexing | negligible | `add_items` is already <0.2ms per 32 vectors; GPU transfer overhead would dominate. GPU Faiss matters for **search** on large indices, not indexing throughput |
+- **P0: Parallelize image I/O** (Implemented ✅) — `load_images` multithreaded decode.
+- **P1: Batch size tuning** (Implemented ✅) — `TWIN_BATCH_SIZE=64` default.
+- **P2: Pipelined double-buffering** (Implemented ✅) — background thread preloads batch N+1 while GPU computes batch N, lifting ingestion throughput by +19.6%.
+- **P3: GPU Faiss for indexing** — Evaluated: negligible gain for insert (<0.2ms per batch). Retained on GPU for large index search speedup.
 
 ### Search Latency Budget (per query)
 
