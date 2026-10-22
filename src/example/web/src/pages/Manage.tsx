@@ -8,11 +8,14 @@ import {
   setGpuEnabled,
   indexImage,
   indexBatch,
+  indexBatchAsync,
+  getBatchTaskStatus,
   clearIndex,
   trainIndex,
   type HealthData,
   type SyncStatus,
   type BatchStatus,
+  type BatchTaskStatus,
   type RebuildStatus,
   type RuntimeConfig,
   type IndexStatus,
@@ -67,18 +70,6 @@ export default function Manage() {
     return () => es.close();
   }, [syncStatus?.running]);
 
-  // SSE: batch status stream
-  useEffect(() => {
-    if (!batchStatus?.running) return;
-    const es = new EventSource("/api/v1/index/batch/status/stream");
-    es.onmessage = (e) => {
-      try { setBatchStatus(JSON.parse(e.data)); } catch { /* ignore */ }
-    };
-    es.addEventListener("done", () => es.close());
-    es.onerror = () => es.close();
-    return () => es.close();
-  }, [batchStatus?.running]);
-
   // SSE: rebuild status stream
   useEffect(() => {
     if (!rebuilding) return;
@@ -103,19 +94,89 @@ export default function Manage() {
   async function handleBatch() {
     if (!directory.trim()) { setError("Enter a directory path."); return; }
     setLoading(true); setError(null); setResult(null);
-    // Seed batch status so polling starts immediately
-    setBatchStatus({ running: true, total: 0, indexed: 0, failed: 0, current_batch: 0, total_batches: 0, progress_pct: 0, elapsed_ms: 0, eta_ms: 0, rate_img_per_s: 0 });
+    setBatchStatus({
+      running: true,
+      total: 0,
+      indexed: 0,
+      failed: 0,
+      current_batch: 0,
+      total_batches: 0,
+      progress_pct: 0,
+      elapsed_ms: 0,
+      eta_ms: 0,
+      rate_img_per_s: 0,
+    });
+
     try {
-      const batchPromise = indexBatch(directory.trim());
-      // Give the backend a tick to initialise _batch_state
-      await new Promise(r => setTimeout(r, 100));
-      const initial = await getBatchStatus();
-      setBatchStatus(initial);
-      setResult(await batchPromise);
-      refreshHealth();
+      const task = await indexBatchAsync(directory.trim());
+      const taskId = task.task_id;
+
+      await new Promise<void>((resolve, reject) => {
+        const es = new EventSource(`/api/v1/index/batch/status/${encodeURIComponent(taskId)}/stream`);
+        let settled = false;
+
+        es.onmessage = (e) => {
+          try {
+            const st: BatchTaskStatus = JSON.parse(e.data);
+            setBatchStatus({
+              running: st.status === "started" || st.status === "running",
+              total: st.total,
+              indexed: st.indexed,
+              failed: st.failed,
+              current_batch: st.current_batch ?? 0,
+              total_batches: st.total_batches ?? 0,
+              progress_pct: st.progress_pct,
+              elapsed_ms: st.elapsed_ms || st.time_ms || 0,
+              eta_ms: st.eta_ms || 0,
+              rate_img_per_s: st.rate_img_per_s || 0,
+            });
+
+            if (st.status === "completed") {
+              settled = true;
+              es.close();
+              setResult({
+                status: "completed",
+                total: st.total,
+                indexed: st.indexed,
+                failed: st.failed,
+                time_ms: st.time_ms || st.elapsed_ms || 0,
+              });
+              refreshHealth();
+              resolve();
+            } else if (st.status === "failed") {
+              settled = true;
+              es.close();
+              reject(new Error(st.error || "Batch indexing failed"));
+            }
+          } catch (err) {
+            settled = true;
+            es.close();
+            reject(err);
+          }
+        };
+
+        es.addEventListener("done", () => {
+          if (!settled) {
+            settled = true;
+            es.close();
+            resolve();
+          }
+        });
+
+        es.onerror = () => {
+          if (!settled) {
+            settled = true;
+            es.close();
+            reject(new Error("Batch status stream connection lost"));
+          }
+        };
+      });
+    } catch (e: any) {
+      setError(e.response?.data?.detail ?? e.message);
+    } finally {
+      setLoading(false);
+      setBatchStatus(null);
     }
-    catch (e: any) { setError(e.response?.data?.detail ?? e.message); }
-    finally { setLoading(false); setBatchStatus(null); }
   }
 
   async function handleClear() {

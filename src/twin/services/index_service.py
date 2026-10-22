@@ -254,14 +254,79 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
                     _processed_samples=[],
                 )
 
-    try:
-        for i in range(0, len(image_files), batch_size):
-            batch_paths = image_files[i : i + batch_size]
-            batch_num = i // batch_size + 1
-            imgs, ok_paths, bad = load_images(batch_paths)
-            failed += len(bad)
+    batches = [image_files[i : i + batch_size] for i in range(0, len(image_files), batch_size)]
 
-            if not imgs:
+    try:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-preload") as preloader:
+            future_next = preloader.submit(load_images, batches[0]) if batches else None
+
+            for b_idx, batch_paths in enumerate(batches):
+                batch_num = b_idx + 1
+                try:
+                    imgs, ok_paths, bad = future_next.result() if future_next else ([], [], [])
+                except Exception as e:
+                    logger.error("Failed to preload batch %d: %s", batch_num, e, exc_info=True)
+                    imgs, ok_paths, bad = [], [], list(batch_paths)
+
+                # Submit next batch asynchronously while computing current batch
+                if b_idx + 1 < len(batches):
+                    future_next = preloader.submit(load_images, batches[b_idx + 1])
+                else:
+                    future_next = None
+
+                failed += len(bad)
+
+                if not imgs:
+                    if task_id:
+                        with _tasks_lock:
+                            if task_id in _tasks:
+                                _tasks[task_id].update(
+                                    current_batch=batch_num,
+                                    indexed=indexed,
+                                    failed=failed,
+                                )
+                    continue
+
+                try:
+                    vectors = compute_embeddings(imgs)
+                    ahashes = compute_ahashes(imgs)
+                    dhashes = compute_dhashes(imgs)
+                    phashes = compute_phashes(imgs)
+
+                    metas = [
+                        {"filename": p.name, "path": str(p), "ahash": ah, "dhash": dh, "phash": ph}
+                        for p, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes)
+                    ]
+                    indexer.add_items(vectors, metas)
+                    indexed += len(metas)
+
+                except Exception:
+                    logger.warning(
+                        "Batch failed at offset %d, falling back to individual",
+                        b_idx * batch_size,
+                        exc_info=True,
+                    )
+                    for path, img in zip(ok_paths, imgs):
+                        try:
+                            _index_single_from_disk(img, path)
+                            indexed += 1
+                        except Exception:
+                            logger.warning("Failed to index: %s", path, exc_info=True)
+                            failed += 1
+
+                        if task_id:
+                            with _tasks_lock:
+                                if task_id in _tasks:
+                                    _tasks[task_id].update(
+                                        current_batch=batch_num,
+                                        indexed=indexed,
+                                        failed=failed,
+                                    )
+                                    samples = _tasks[task_id]["_processed_samples"]
+                                    samples.append((time.perf_counter(), indexed + failed))
+                                    if len(samples) > 60:
+                                        samples.pop(0)
+
                 if task_id:
                     with _tasks_lock:
                         if task_id in _tasks:
@@ -270,51 +335,14 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
                                 indexed=indexed,
                                 failed=failed,
                             )
-                continue
+                            samples = _tasks[task_id]["_processed_samples"]
+                            samples.append((time.perf_counter(), indexed + failed))
+                            if len(samples) > 60:
+                                samples.pop(0)
 
-            try:
-                vectors = compute_embeddings(imgs)
-                ahashes = compute_ahashes(imgs)
-                dhashes = compute_dhashes(imgs)
-                phashes = compute_phashes(imgs)
-
-                metas = [
-                    {"filename": p.name, "path": str(p), "ahash": ah, "dhash": dh, "phash": ph}
-                    for p, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes)
-                ]
-                indexer.add_items(vectors, metas)
-                indexed += len(metas)
-
-            except Exception:
-                logger.warning(
-                    "Batch failed at offset %d, falling back to individual",
-                    i,
-                    exc_info=True,
-                )
-                for path, img in zip(ok_paths, imgs):
-                    try:
-                        _index_single_from_disk(img, path)
-                        indexed += 1
-                    except Exception:
-                        logger.warning("Failed to index: %s", path, exc_info=True)
-                        failed += 1
-
-            if task_id:
-                with _tasks_lock:
-                    if task_id in _tasks:
-                        _tasks[task_id].update(
-                            current_batch=batch_num,
-                            indexed=indexed,
-                            failed=failed,
-                        )
-                        samples = _tasks[task_id]["_processed_samples"]
-                        samples.append((time.perf_counter(), indexed + failed))
-                        if len(samples) > 60:
-                            samples.pop(0)
-
-            # Free memory
-            for img in imgs:
-                img.close()
+                # Free memory
+                for img in imgs:
+                    img.close()
     finally:
         pass
 

@@ -105,6 +105,26 @@ def clip_model(gpu_info: dict) -> bool:
     return True
 
 
+@pytest.fixture(scope="session")
+def dinov2_model(gpu_info: dict) -> bool:
+    """Load DINOv2 model once for benchmark session with GPU warmup."""
+    from twin.models import dinov2_model as model
+
+    model.load()
+
+    if gpu_info["device"] == "cuda":
+        import torch
+
+        from tests.benchmarks.fixtures.synthetic import random_image
+
+        for _ in range(5):
+            img = random_image((224, 224))
+            _ = model.encode_image(img)
+            torch.cuda.synchronize()
+
+    return True
+
+
 # ── Function-scoped fixtures (fresh per benchmark) ────────────────────────────
 
 

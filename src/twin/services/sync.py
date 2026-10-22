@@ -9,6 +9,7 @@ GET /api/v1/sync/status endpoint can report background sync progress + ETA.
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from twin.core.config import settings
 from twin.services.embedding import compute_embeddings
@@ -150,72 +151,88 @@ def sync_images_dir() -> dict:
     failed = 0
     batch_num = 0
 
-    for i in range(0, len(to_index), batch_size):
-        batch_paths = to_index[i : i + batch_size]
-        batch_num += 1
+    batches = [to_index[i : i + batch_size] for i in range(0, len(to_index), batch_size)]
 
-        # Step 1: Load images
-        imgs, ok_paths, bad = load_images(batch_paths)
-        failed += len(bad)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sync-preload") as preloader:
+        future_next = preloader.submit(load_images, batches[0]) if batches else None
 
-        if not imgs:
-            _update_progress(indexed, skipped, failed)
-            continue
+        for b_idx, batch_paths in enumerate(batches):
+            batch_num = b_idx + 1
+            try:
+                imgs, ok_paths, bad = future_next.result() if future_next else ([], [], [])
+            except Exception as e:
+                logger.error("Failed to preload sync batch %d: %s", batch_num, e, exc_info=True)
+                imgs, ok_paths, bad = [], [], list(batch_paths)
 
-        try:
-            # Step 2: Batch CLIP embedding (one forward pass for the whole batch)
-            vectors = compute_embeddings(imgs)
+            # Preload next batch asynchronously while computing current batch
+            if b_idx + 1 < len(batches):
+                future_next = preloader.submit(load_images, batches[b_idx + 1])
+            else:
+                future_next = None
 
-            # Step 3: Parallel aHash + dHash + pHash
-            ahashes = compute_ahashes(imgs)
-            dhashes = compute_dhashes(imgs)
-            phashes = compute_phashes(imgs)
+            failed += len(bad)
 
-            # Step 4: Build metadata and batch-add to index
-            metas = []
-            for path, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes):
-                metas.append(
-                    {
-                        "filename": path.name,
-                        "path": str(path),
-                        "ahash": ah,
-                        "dhash": dh,
-                        "phash": ph,
-                    }
+            if not imgs:
+                _update_progress(indexed, skipped, failed)
+                continue
+
+            try:
+                # Step 2: Batch CLIP embedding (one forward pass for the whole batch)
+                vectors = compute_embeddings(imgs)
+
+                # Step 3: Parallel aHash + dHash + pHash
+                ahashes = compute_ahashes(imgs)
+                dhashes = compute_dhashes(imgs)
+                phashes = compute_phashes(imgs)
+
+                # Step 4: Build metadata and batch-add to index
+                metas = []
+                for path, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes):
+                    metas.append(
+                        {
+                            "filename": path.name,
+                            "path": str(path),
+                            "ahash": ah,
+                            "dhash": dh,
+                            "phash": ph,
+                        }
+                    )
+
+                indexer.add_items(vectors, metas)
+                indexed += len(metas)
+
+                pct = (indexed + skipped) * 100 // total_files
+                logger.info(
+                    "Sync progress: %d/%d (%d%%) — batch %d/%d",
+                    indexed + skipped,
+                    total_files,
+                    pct,
+                    batch_num,
+                    total_batches,
                 )
 
-            indexer.add_items(vectors, metas)
-            indexed += len(metas)
+            except Exception:
+                logger.warning(
+                    "Batch failed at offset %d, falling back to individual",
+                    b_idx * batch_size,
+                    exc_info=True,
+                )
+                # Fallback: index one by one for this batch
+                for path, img in zip(ok_paths, imgs):
+                    try:
+                        _index_single_from_disk(img, path)
+                        indexed += 1
+                    except Exception:
+                        logger.warning("Failed to index: %s", path, exc_info=True)
+                        failed += 1
+                    _update_progress(indexed, skipped, failed)
 
-            pct = (indexed + skipped) * 100 // total_files
-            logger.info(
-                "Sync progress: %d/%d (%d%%) — batch %d/%d",
-                indexed + skipped,
-                total_files,
-                pct,
-                batch_num,
-                total_batches,
-            )
+            # Update shared progress after each batch
+            _update_progress(indexed, skipped, failed)
 
-        except Exception:
-            logger.warning(
-                "Batch failed at offset %d, falling back to individual", i, exc_info=True
-            )
-            # Fallback: index one by one for this batch
-            for path, img in zip(ok_paths, imgs):
-                try:
-                    _index_single_from_disk(img, path)
-                    indexed += 1
-                except Exception:
-                    logger.warning("Failed to index: %s", path, exc_info=True)
-                    failed += 1
-
-        # Update shared progress after each batch
-        _update_progress(indexed, skipped, failed)
-
-        # Free memory
-        for img in imgs:
-            img.close()
+            # Free memory
+            for img in imgs:
+                img.close()
 
     elapsed = time.perf_counter() - t0
     rate = indexed / elapsed if elapsed > 0 else 0
