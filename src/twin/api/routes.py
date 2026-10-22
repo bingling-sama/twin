@@ -274,6 +274,21 @@ async def batch_status_stream():
     )
 
 
+@router.get("/index/batch/status/{task_id}/stream")
+async def batch_task_status_stream(task_id: str):
+    """SSE stream of batch indexing progress for a specific task."""
+    return StreamingResponse(
+        _sse_stream(
+            get_state=lambda: get_task_status(task_id)
+            or {"status": "failed", "error": f"Task not found: {task_id}"},
+            is_done=lambda s: s.get("status") in ("completed", "failed"),
+            interval=0.3,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/index/rebuild/status/stream")
 async def rebuild_status_stream():
     """SSE stream of index rebuild progress."""

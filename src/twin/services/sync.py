@@ -158,7 +158,11 @@ def sync_images_dir() -> dict:
 
         for b_idx, batch_paths in enumerate(batches):
             batch_num = b_idx + 1
-            imgs, ok_paths, bad = future_next.result() if future_next else ([], [], [])
+            try:
+                imgs, ok_paths, bad = future_next.result() if future_next else ([], [], [])
+            except Exception as e:
+                logger.error("Failed to preload sync batch %d: %s", batch_num, e, exc_info=True)
+                imgs, ok_paths, bad = [], [], list(batch_paths)
 
             # Preload next batch asynchronously while computing current batch
             if b_idx + 1 < len(batches):
@@ -221,6 +225,7 @@ def sync_images_dir() -> dict:
                     except Exception:
                         logger.warning("Failed to index: %s", path, exc_info=True)
                         failed += 1
+                    _update_progress(indexed, skipped, failed)
 
             # Update shared progress after each batch
             _update_progress(indexed, skipped, failed)

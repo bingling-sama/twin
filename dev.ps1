@@ -69,18 +69,15 @@ try {
     if (-not $BackendOnly) {
         Write-Host "Starting Twin Frontend on http://localhost:$FrontPort ..." -ForegroundColor Green
         $webDir = Join-Path $ScriptDir "src\example\web"
-        $frontendProcess = $null
-        try {
-            $frontendProcess = Start-Process -FilePath "pnpm.cmd" `
-                -ArgumentList "dev --host" `
-                -WorkingDirectory $webDir `
-                -PassThru
-        } catch {
-            $frontendProcess = Start-Process -FilePath "pnpm" `
-                -ArgumentList "dev --host" `
-                -WorkingDirectory $webDir `
-                -PassThru
+        $pnpmExe = (Get-Command pnpm.cmd, pnpm -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if (-not $pnpmExe) {
+            Write-Error "pnpm not found in PATH."
+            exit 1
         }
+        $frontendProcess = Start-Process -FilePath $pnpmExe `
+            -ArgumentList "dev --host" `
+            -WorkingDirectory $webDir `
+            -PassThru
         if ($frontendProcess) {
             $Processes += $frontendProcess
         }

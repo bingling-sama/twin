@@ -228,3 +228,28 @@ def test_text_search_dinov2_guard_returns_400(client, monkeypatch):
     )
     assert resp.status_code == 400
     assert "vision-only" in resp.json()["detail"]
+
+
+def test_async_batch_index_task_sse_stream(client, tmp_path):
+    """GET /index/batch/status/{task_id}/stream streams task progress and concludes."""
+    img = Image.open(FIXTURES / "red.png")
+    img.save(tmp_path / "test_async_stream.png")
+
+    resp = client.post(
+        "/api/v1/index/batch",
+        json={"directory": str(tmp_path), "async_mode": True},
+    )
+    assert resp.status_code == 200
+    task_id = resp.json()["task_id"]
+
+    # Connect to task SSE stream
+    with client.stream("GET", f"/api/v1/index/batch/status/{task_id}/stream") as stream:
+        assert stream.status_code == 200
+        events = []
+        for line in stream.iter_lines():
+            if line.startswith("data:"):
+                events.append(line)
+            if "event: done" in line:
+                break
+        assert len(events) >= 1
+

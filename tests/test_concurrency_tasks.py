@@ -120,3 +120,41 @@ def test_task_lru_access_refresh_prevents_eviction():
             # task_1 was never accessed, so it should be evicted first as the new oldest
             assert "task_1" not in _tasks
 
+
+def test_preload_exception_resilience(tmp_path, monkeypatch):
+    """When a batch preload future throws an exception, remaining batches continue."""
+    import twin.utils.image
+    from twin.core.config import settings
+    from twin.services.index_service import index_batch
+
+    # Save 4 images
+    for i in range(4):
+        img = Image.open(FIXTURES / "red.png")
+        img.save(tmp_path / f"img_{i}.png")
+
+    old_bs = settings.batch_size
+    settings.batch_size = 2
+    try:
+        indexer.clear()
+        orig_load_images = twin.utils.image.load_images
+        call_count = 0
+
+        def _flaky_load_images(paths, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("Simulated disk read error on batch 1")
+            return orig_load_images(paths, *args, **kwargs)
+
+        monkeypatch.setattr("twin.services.index_service.load_images", _flaky_load_images)
+        res = index_batch(tmp_path)
+        assert res["status"] == "completed"
+        # First batch (2 images) failed gracefully due to preload exception,
+        # second batch (2 images) succeeded
+        assert res["failed"] == 2
+        assert res["indexed"] == 2
+    finally:
+        settings.batch_size = old_bs
+        indexer.clear()
+
+

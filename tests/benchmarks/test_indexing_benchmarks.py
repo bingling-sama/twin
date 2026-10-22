@@ -52,6 +52,38 @@ def test_bench_index_batch_throughput(benchmark, clip_model, tmp_path, batch_siz
     benchmark(index_batch, str(tmp_path))
 
 
+# ── Multi-batch pipelined throughput (double-buffering preloader gate) ─────────
+
+
+@pytest.mark.smoke
+def test_bench_index_batch_pipelined_multi_batch(benchmark, clip_model, tmp_path):
+    """Benchmark: end-to-end multi-batch index_batch() throughput with preloader.
+
+    Writes 64 images across 4 batches (batch_size=16) to exercise the
+    ThreadPoolExecutor double-buffering image preloader pipeline.
+    Serves as an empirical regression gate for pipeline throughput gains.
+    """
+    from tests.benchmarks.fixtures.synthetic import save_images_to_dir
+    from twin.core.config import settings
+    from twin.services.index_service import index_batch
+    from twin.services.indexer import indexer
+
+    save_images_to_dir(tmp_path, count=64, sizes=[(224, 224)], formats=["png"])
+
+    old_batch_size = settings.batch_size
+    settings.batch_size = 16
+
+    def _run():
+        indexer.clear()
+        return index_batch(str(tmp_path))
+
+    try:
+        benchmark(_run)
+    finally:
+        settings.batch_size = old_batch_size
+        indexer.clear()
+
+
 # ── _index_single_from_disk (internal fallback) ───────────────────────────────
 
 

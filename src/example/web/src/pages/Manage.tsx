@@ -70,18 +70,6 @@ export default function Manage() {
     return () => es.close();
   }, [syncStatus?.running]);
 
-  // SSE: batch status stream
-  useEffect(() => {
-    if (!batchStatus?.running) return;
-    const es = new EventSource("/api/v1/index/batch/status/stream");
-    es.onmessage = (e) => {
-      try { setBatchStatus(JSON.parse(e.data)); } catch { /* ignore */ }
-    };
-    es.addEventListener("done", () => es.close());
-    es.onerror = () => es.close();
-    return () => es.close();
-  }, [batchStatus?.running]);
-
   // SSE: rebuild status stream
   useEffect(() => {
     if (!rebuilding) return;
@@ -123,37 +111,66 @@ export default function Manage() {
       const task = await indexBatchAsync(directory.trim());
       const taskId = task.task_id;
 
-      while (true) {
-        await new Promise((r) => setTimeout(r, 400));
-        const st: BatchTaskStatus = await getBatchTaskStatus(taskId);
+      await new Promise<void>((resolve, reject) => {
+        const es = new EventSource(`/api/v1/index/batch/status/${encodeURIComponent(taskId)}/stream`);
+        let settled = false;
 
-        setBatchStatus({
-          running: st.status === "started" || st.status === "running",
-          total: st.total,
-          indexed: st.indexed,
-          failed: st.failed,
-          current_batch: st.current_batch ?? 0,
-          total_batches: st.total_batches ?? 0,
-          progress_pct: st.progress_pct,
-          elapsed_ms: st.elapsed_ms || st.time_ms || 0,
-          eta_ms: st.eta_ms || 0,
-          rate_img_per_s: st.rate_img_per_s || 0,
+        es.onmessage = (e) => {
+          try {
+            const st: BatchTaskStatus = JSON.parse(e.data);
+            setBatchStatus({
+              running: st.status === "started" || st.status === "running",
+              total: st.total,
+              indexed: st.indexed,
+              failed: st.failed,
+              current_batch: st.current_batch ?? 0,
+              total_batches: st.total_batches ?? 0,
+              progress_pct: st.progress_pct,
+              elapsed_ms: st.elapsed_ms || st.time_ms || 0,
+              eta_ms: st.eta_ms || 0,
+              rate_img_per_s: st.rate_img_per_s || 0,
+            });
+
+            if (st.status === "completed") {
+              settled = true;
+              es.close();
+              setResult({
+                status: "completed",
+                total: st.total,
+                indexed: st.indexed,
+                failed: st.failed,
+                time_ms: st.time_ms || st.elapsed_ms || 0,
+              });
+              refreshHealth();
+              resolve();
+            } else if (st.status === "failed") {
+              settled = true;
+              es.close();
+              reject(new Error(st.error || "Batch indexing failed"));
+            }
+          } catch (err) {
+            settled = true;
+            es.close();
+            reject(err);
+          }
+        };
+
+        es.addEventListener("done", () => {
+          if (!settled) {
+            settled = true;
+            es.close();
+            resolve();
+          }
         });
 
-        if (st.status === "completed") {
-          setResult({
-            status: "completed",
-            total: st.total,
-            indexed: st.indexed,
-            failed: st.failed,
-            time_ms: st.time_ms || st.elapsed_ms || 0,
-          });
-          refreshHealth();
-          break;
-        } else if (st.status === "failed") {
-          throw new Error(st.error || "Batch indexing failed");
-        }
-      }
+        es.onerror = () => {
+          if (!settled) {
+            settled = true;
+            es.close();
+            reject(new Error("Batch status stream connection lost"));
+          }
+        };
+      });
     } catch (e: any) {
       setError(e.response?.data?.detail ?? e.message);
     } finally {

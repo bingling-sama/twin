@@ -262,7 +262,11 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
 
             for b_idx, batch_paths in enumerate(batches):
                 batch_num = b_idx + 1
-                imgs, ok_paths, bad = future_next.result() if future_next else ([], [], [])
+                try:
+                    imgs, ok_paths, bad = future_next.result() if future_next else ([], [], [])
+                except Exception as e:
+                    logger.error("Failed to preload batch %d: %s", batch_num, e, exc_info=True)
+                    imgs, ok_paths, bad = [], [], list(batch_paths)
 
                 # Submit next batch asynchronously while computing current batch
                 if b_idx + 1 < len(batches):
@@ -309,6 +313,19 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
                         except Exception:
                             logger.warning("Failed to index: %s", path, exc_info=True)
                             failed += 1
+
+                        if task_id:
+                            with _tasks_lock:
+                                if task_id in _tasks:
+                                    _tasks[task_id].update(
+                                        current_batch=batch_num,
+                                        indexed=indexed,
+                                        failed=failed,
+                                    )
+                                    samples = _tasks[task_id]["_processed_samples"]
+                                    samples.append((time.perf_counter(), indexed + failed))
+                                    if len(samples) > 60:
+                                        samples.pop(0)
 
                 if task_id:
                     with _tasks_lock:
