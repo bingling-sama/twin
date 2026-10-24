@@ -115,6 +115,7 @@ def test_dynamic_short_circuiting(monkeypatch):
             faiss_index_type="flat",
             verification_budget=1,
             rotation_invariant=False,
+            enable_fast_path=False,
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
         monkeypatch.setattr("twin.services.search.settings", s)
@@ -147,6 +148,7 @@ def test_dynamic_short_circuiting(monkeypatch):
             faiss_index_type="flat",
             verification_budget=50,
             rotation_invariant=False,
+            enable_fast_path=False,
         )
         monkeypatch.setattr("twin.services.search.settings", s2)
         res_topk = search(img, top_k=2)

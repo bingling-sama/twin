@@ -224,6 +224,68 @@ def search(
     query_dhash = compute_dhash(image)
     query_phash = compute_phash(image)
 
+    # ------------------------------------------------------------------
+    # Fast-Path: Zero-GPU Binary pHash bypass for exact/near-duplicate matches
+    # ------------------------------------------------------------------
+    # If fast exact matches can satisfy the requested top_k, exit immediately
+    # without paying the expensive GPU ViT embedding cost.
+    fast_exact_threshold = 2
+    if (
+        settings.enable_fast_path
+        and not rotation_invariant
+        and settings.verification_budget >= top_k
+    ):
+        bin_dists, bin_ids = indexer.search_binary(query_phash, k=top_k, datasource=target_ds)
+        if bin_ids and len(bin_ids) >= top_k:
+            high_conf: list[tuple[int, int, dict]] = []
+            for d, idx in zip(bin_dists, bin_ids):
+                if d <= fast_exact_threshold:
+                    meta = indexer.get_metadata(idx, datasource=target_ds)
+                    if meta:
+                        high_conf.append((idx, int(d), meta))
+                else:
+                    break
+
+            if len(high_conf) >= top_k:
+                fast_candidates: list[SearchCandidate] = []
+                for idx, p_dist, meta in high_conf[:top_k]:
+                    cpath = meta.get("path", "")
+                    cand_dhash = meta.get("dhash", "")
+                    d_dist = hamming_distance(query_dhash, cand_dhash) if cand_dhash else 999
+                    ok_ssim, ssim_val = _passes_ssim(image, cpath, ssim_threshold)
+                    if ok_ssim and d_dist <= dhash_threshold:
+                        c = SearchCandidate(
+                            id=idx,
+                            filename=meta.get("filename", ""),
+                            distance=0.0,
+                            meta=meta,
+                            stages_passed=3,
+                            dhash_distance=d_dist,
+                            phash_distance=p_dist,
+                            ssim_score=round(ssim_val, 4),
+                            candidate_rotations=[0],
+                            best_rotation=0,
+                        )
+                        fast_candidates.append(c)
+
+                if len(fast_candidates) >= top_k:
+                    _final_sort(fast_candidates)
+                    t_fast = time.perf_counter()
+                    stages["fast_path"] = {
+                        "hit": True,
+                        "candidates": len(fast_candidates),
+                        "elapsed_ms": round((t_fast - t0) * 1000, 3),
+                    }
+                    logger.info(
+                        "Search fast-path hit in %.2fms: %d confirmed duplicates >= top_k (%d)",
+                        (t_fast - t0) * 1000,
+                        len(fast_candidates),
+                        top_k,
+                    )
+                    return _build_response(
+                        fast_candidates[:top_k], stages, t0, datasource=target_ds
+                    )
+
     if rotation_invariant:
         # Extract 4 orthogonal rotation embeddings in a single batch forward pass
         rotated_imgs = [rotate_image(image, a) for a in (0, 1, 2, 3)]

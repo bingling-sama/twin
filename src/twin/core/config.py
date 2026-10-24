@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # --- Search ---
     top_k: int = 100
     rotation_invariant: bool = False  # MC UV orientation is fixed; 0° locked for efficiency
+    enable_fast_path: bool = True  # zero-GPU fast-path for exact duplicate matches
     binary_recall_k: int = 1000  # candidate count from fast binary pHash retrieval
     verification_budget: int = 200  # maximum candidate budget for expensive SSIM verification
     ahash_threshold: int = 10  # max Hamming distance for aHash pre-filter
