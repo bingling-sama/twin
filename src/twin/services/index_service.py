@@ -12,9 +12,12 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 from twin.core.config import settings
+from twin.services.classifier import TextureType, inspect_texture
+from twin.services.converter import single2double
 from twin.services.embedding import compute_embedding, compute_embeddings
 from twin.services.hasher import (
     compute_ahash,
@@ -192,28 +195,45 @@ def index_single(image: Image.Image, filename: str, content: bytes) -> dict:
     """
     Index a single image uploaded via the API.
 
-    Returns {"status": "indexed"|"already_exists", "id": int, "filename": str}.
+    Returns {"status": "indexed"|"already_exists", "id": int, "filename": str, "datasource": str}.
     """
+    report = inspect_texture(image)
+    target_ds = "cape" if report.texture_type in (TextureType.CAPE, TextureType.ELYTRA) else "skin"
+    processed_image = single2double(image) if report.can_auto_upgrade else image
+
     # Dedup check
-    if filename in indexer.get_indexed_filenames():
-        return {"status": "already_exists", "id": -1, "filename": filename}
+    if filename in indexer.get_indexed_filenames(datasource=target_ds):
+        return {
+            "status": "already_exists",
+            "id": -1,
+            "filename": filename,
+            "datasource": target_ds,
+        }
 
     # Persist to disk
     saved_path = settings.images_path / filename
     saved_path.write_bytes(content)
 
     # Compute and store
-    vector = compute_embedding(image)
+    vector = compute_embedding(processed_image)
     meta = {
         "filename": filename,
         "path": str(saved_path),
-        "ahash": compute_ahash(image),
-        "dhash": compute_dhash(image),
-        "phash": compute_phash(image),
+        "datasource": target_ds,
+        "texture_type": report.texture_type.value,
+        "upgraded": report.can_auto_upgrade,
+        "ahash": compute_ahash(processed_image),
+        "dhash": compute_dhash(processed_image),
+        "phash": compute_phash(processed_image),
     }
-    idx = indexer.add_item(vector, meta)
-    logger.info("Indexed image %d: %s", idx, filename)
-    return {"status": "indexed", "id": idx, "filename": filename}
+    idx = indexer.add_item(vector, meta, datasource=target_ds)
+    logger.info("Indexed image %d (%s): %s", idx, target_ds, filename)
+    return {
+        "status": "indexed",
+        "id": idx,
+        "filename": filename,
+        "datasource": target_ds,
+    }
 
 
 def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
@@ -288,17 +308,52 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
                     continue
 
                 try:
-                    vectors = compute_embeddings(imgs)
-                    ahashes = compute_ahashes(imgs)
-                    dhashes = compute_dhashes(imgs)
-                    phashes = compute_phashes(imgs)
+                    proc_imgs = []
+                    ds_list = []
+                    reports = []
+                    for img in imgs:
+                        rep = inspect_texture(img)
+                        reports.append(rep)
+                        ds = (
+                            "cape"
+                            if rep.texture_type in (TextureType.CAPE, TextureType.ELYTRA)
+                            else "skin"
+                        )
+                        ds_list.append(ds)
+                        proc_imgs.append(single2double(img) if rep.can_auto_upgrade else img)
 
-                    metas = [
-                        {"filename": p.name, "path": str(p), "ahash": ah, "dhash": dh, "phash": ph}
-                        for p, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes)
-                    ]
-                    indexer.add_items(vectors, metas)
-                    indexed += len(metas)
+                    vectors = compute_embeddings(proc_imgs)
+                    ahashes = compute_ahashes(proc_imgs)
+                    dhashes = compute_dhashes(proc_imgs)
+                    phashes = compute_phashes(proc_imgs)
+
+                    groups: dict[str, tuple[list[np.ndarray], list[dict]]] = {}
+                    for i, (p, ah, dh, ph, ds, rep) in enumerate(
+                        zip(ok_paths, ahashes, dhashes, phashes, ds_list, reports)
+                    ):
+                        if ds not in groups:
+                            groups[ds] = ([], [])
+                        groups[ds][0].append(vectors[i])
+                        groups[ds][1].append(
+                            {
+                                "filename": p.name,
+                                "path": str(p),
+                                "datasource": ds,
+                                "texture_type": rep.texture_type.value,
+                                "upgraded": rep.can_auto_upgrade,
+                                "ahash": ah,
+                                "dhash": dh,
+                                "phash": ph,
+                            }
+                        )
+
+                    for ds, (v_list, m_list) in groups.items():
+                        indexer.add_items(np.stack(v_list), m_list, datasource=ds)
+                        indexed += len(m_list)
+
+                    for p_img, orig_img in zip(proc_imgs, imgs):
+                        if p_img is not orig_img:
+                            p_img.close()
 
                 except Exception:
                     logger.warning(
@@ -377,12 +432,23 @@ def index_batch(directory: str | Path, task_id: str | None = None) -> dict:
 
 def _index_single_from_disk(image: Image.Image, path: Path) -> int:
     """Index a single image that's already on disk. Returns assigned ID."""
-    vector = compute_embedding(image)
-    meta = {
-        "filename": path.name,
-        "path": str(path),
-        "ahash": compute_ahash(image),
-        "dhash": compute_dhash(image),
-        "phash": compute_phash(image),
-    }
-    return indexer.add_item(vector, meta)
+    report = inspect_texture(image)
+    target_ds = "cape" if report.texture_type in (TextureType.CAPE, TextureType.ELYTRA) else "skin"
+    processed_image = single2double(image) if report.can_auto_upgrade else image
+
+    try:
+        vector = compute_embedding(processed_image)
+        meta = {
+            "filename": path.name,
+            "path": str(path),
+            "datasource": target_ds,
+            "texture_type": report.texture_type.value,
+            "upgraded": report.can_auto_upgrade,
+            "ahash": compute_ahash(processed_image),
+            "dhash": compute_dhash(processed_image),
+            "phash": compute_phash(processed_image),
+        }
+        return indexer.add_item(vector, meta, datasource=target_ds)
+    finally:
+        if processed_image is not image:
+            processed_image.close()

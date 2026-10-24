@@ -48,10 +48,18 @@ class Settings(BaseSettings):
 
     # --- Search ---
     top_k: int = 100
-    rotation_invariant: bool = True  # tolerate 0/90/180/270 deg rotation during dHash verification
+    rotation_invariant: bool = False  # MC UV orientation is fixed; 0° locked for efficiency
+    enable_fast_path: bool = True  # zero-GPU fast-path for exact duplicate matches
+    binary_recall_k: int = 1000  # candidate count from fast binary pHash retrieval
+    verification_budget: int = 200  # maximum candidate budget for expensive SSIM verification
     ahash_threshold: int = 10  # max Hamming distance for aHash pre-filter
     dhash_threshold: int = 10  # max Hamming distance for dHash duplicate
     phash_threshold: int = 12  # max Hamming distance for pHash duplicate
+    # --- Verification & Verifier ---
+    verifier_type: str = "diffmask"  # "diffmask" | "ssim"
+    diffmask_tolerance: int = 5  # per-channel RGB tolerance for DiffMask
+    diffmask_threshold: float = 0.05  # max differing pixel ratio for confirmed match (0.05 = 5%)
+    binary_hamming_threshold: int = 10  # max Hamming distance for binary candidate recall
     ssim_threshold: float = 0.90  # min SSIM for structural duplicate
     ssim_size: int = 128  # resize dimension for SSIM comparison (128 = fast, 256 = precise)
     ssim_device: str = "auto"  # 'auto' | 'cuda' | 'cpu'
@@ -77,20 +85,41 @@ class Settings(BaseSettings):
         return _resolve(self.index_path)
 
     @property
+    def data_dir(self) -> Path:
+        """Alias for index_dir."""
+        return self.index_dir
+
+    @property
     def faiss_path(self) -> Path:
-        """Faiss index file for the currently configured type."""
-        return self._faiss_path_for(self.faiss_index_type)
+        """Faiss index file for the currently configured type (default datasource)."""
+        return self._faiss_path_for(self.faiss_index_type, datasource="skin")
 
     @property
     def metadata_path(self) -> Path:
-        """Metadata file for the currently configured type."""
-        return self._metadata_path_for(self.faiss_index_type)
+        """Metadata file for the currently configured type (default datasource)."""
+        return self._metadata_path_for(self.faiss_index_type, datasource="skin")
 
-    def _faiss_path_for(self, index_type: str) -> Path:
-        return self.index_dir / f"index.{index_type}.faiss"
+    def _base_dir_for(self, datasource: str | None = None) -> Path:
+        base = self.index_dir / datasource if datasource else self.index_dir
+        base.mkdir(parents=True, exist_ok=True)
+        return base
 
-    def _metadata_path_for(self, index_type: str) -> Path:
-        return self.index_dir / f"metadata.{index_type}.json"
+    def _faiss_path_for(self, index_type: str, datasource: str | None = None) -> Path:
+        return self._base_dir_for(datasource) / f"index.{index_type}.faiss"
+
+    def _metadata_path_for(self, index_type: str, datasource: str | None = None) -> Path:
+        return self._base_dir_for(datasource) / f"metadata.{index_type}.json"
+
+    def _count_path_for(self, index_type: str, datasource: str | None = None) -> Path:
+        return self._base_dir_for(datasource) / f"index.{index_type}.count"
+
+    @property
+    def binary_faiss_path(self) -> Path:
+        """Binary Faiss index file (default datasource)."""
+        return self._binary_faiss_path_for(datasource="skin")
+
+    def _binary_faiss_path_for(self, datasource: str | None = None) -> Path:
+        return self._base_dir_for(datasource) / "index.binary.faiss"
 
     @property
     def legacy_faiss_path(self) -> Path:
@@ -105,13 +134,20 @@ class Settings(BaseSettings):
     def images_path(self) -> Path:
         return _resolve(self.images_dir)
 
-    def all_type_faiss_paths(self) -> list[Path]:
+    def all_type_faiss_paths(self, datasource: str | None = None) -> list[Path]:
         """Return paths for all known index types (for bulk cleanup)."""
-        return [self._faiss_path_for(t) for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")]
+        return [
+            self._faiss_path_for(t, datasource)
+            for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
+        ]
 
-    def all_type_metadata_paths(self) -> list[Path]:
+    def all_type_metadata_paths(self, datasource: str | None = None) -> list[Path]:
         """Return paths for all known index types (for bulk cleanup)."""
-        return [self._metadata_path_for(t) for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")]
+        return [
+            self._metadata_path_for(t, datasource)
+            for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
+        ]
+
 
 
 # Module-level singleton — import this everywhere
