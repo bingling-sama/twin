@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     ahash_threshold: int = 10  # max Hamming distance for aHash pre-filter
     dhash_threshold: int = 10  # max Hamming distance for dHash duplicate
     phash_threshold: int = 12  # max Hamming distance for pHash duplicate
+    # --- Verification & Verifier ---
+    verifier_type: str = "diffmask"  # "diffmask" | "ssim"
+    diffmask_tolerance: int = 5  # per-channel RGB tolerance for DiffMask
+    diffmask_threshold: float = 0.05  # max differing pixel ratio for confirmed match (0.05 = 5%)
+    binary_hamming_threshold: int = 10  # max Hamming distance for binary candidate recall
     ssim_threshold: float = 0.90  # min SSIM for structural duplicate
     ssim_size: int = 128  # resize dimension for SSIM comparison (128 = fast, 256 = precise)
     ssim_device: str = "auto"  # 'auto' | 'cuda' | 'cpu'

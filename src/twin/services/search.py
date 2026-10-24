@@ -34,6 +34,7 @@ from twin.services.hasher import (
     rotate_image,
 )
 from twin.services.indexer import indexer
+from twin.services.verifiers import get_verifier
 from twin.utils.image import load_image
 
 logger = logging.getLogger(__name__)
@@ -180,12 +181,13 @@ def search(
     ssim_threshold: float | None = None,
     rotation_invariant: bool | None = None,
     datasource: str | None = None,
+    verifier_type: str | None = None,
 ) -> dict:
     """
     Two-stage image search with funnel-based filtering.
 
-    Stage 1: CLIP/DINOv2 → Faiss top-K semantic candidates.
-    Stage 2–4: Sequential filters (dHash → pHash → SSIM), each operating
+    Stage 1: Dual-Recall (Faiss semantic vector recall + IndexBinaryFlat pHash recall).
+    Stage 2–4: Sequential filters (dHash → pHash → Verifier), each operating
     only on survivors of the previous stage.
     Supports rotation tolerance across Stage 1–4 (0°, 90°, 180°, 270°).
 
@@ -217,8 +219,11 @@ def search(
     if report.can_auto_upgrade:
         image = single2double(image)
 
+    # Active pluggable verifier
+    active_verifier = get_verifier(verifier_type)
+
     # ==================================================================
-    # Stage 1: Semantic retrieval (Faiss recall)
+    # Fast-Path & Stage 1: Semantic retrieval (Faiss recall)
     # ==================================================================
     recall_k = max(top_k * 5, 50)
     query_dhash = compute_dhash(image)
@@ -252,8 +257,8 @@ def search(
                     cpath = meta.get("path", "")
                     cand_dhash = meta.get("dhash", "")
                     d_dist = hamming_distance(query_dhash, cand_dhash) if cand_dhash else 999
-                    ok_ssim, ssim_val = _passes_ssim(image, cpath, ssim_threshold)
-                    if ok_ssim and d_dist <= dhash_threshold:
+                    v_res = active_verifier.verify_path(image, cpath)
+                    if v_res.passed and d_dist <= dhash_threshold:
                         c = SearchCandidate(
                             id=idx,
                             filename=meta.get("filename", ""),
@@ -262,7 +267,7 @@ def search(
                             stages_passed=3,
                             dhash_distance=d_dist,
                             phash_distance=p_dist,
-                            ssim_score=round(ssim_val, 4),
+                            ssim_score=v_res.score,
                             candidate_rotations=[0],
                             best_rotation=0,
                         )
@@ -286,6 +291,12 @@ def search(
                         fast_candidates[:top_k], stages, t0, datasource=target_ds
                     )
 
+    # ------------------------------------------------------------------
+    # Stage 1: Dual-Recall (Vector semantic recall + Binary pHash recall)
+    # ------------------------------------------------------------------
+    vec_indices: list[int] = []
+    vec_dist_map: dict[int, float] = {}
+
     if rotation_invariant:
         # Extract 4 orthogonal rotation embeddings in a single batch forward pass
         rotated_imgs = [rotate_image(image, a) for a in (0, 1, 2, 3)]
@@ -300,11 +311,43 @@ def search(
                     best_candidate_distances[idx] = float(d)
 
         sorted_candidates = sorted(best_candidate_distances.items(), key=lambda x: x[1])[:recall_k]
-        indices = [idx for idx, _ in sorted_candidates]
-        distances = [d for _, d in sorted_candidates]
+        vec_indices = [idx for idx, _ in sorted_candidates]
+        vec_dist_map = {idx: d for idx, d in sorted_candidates}
     else:
         query_vec = compute_embedding(image)
-        distances, indices = indexer.search(query_vec, k=recall_k, datasource=target_ds)
+        distances, vec_indices = indexer.search(query_vec, k=recall_k, datasource=target_ds)
+        vec_dist_map = {idx: float(d) for d, idx in zip(distances, vec_indices)}
+
+    # Secondary recall: hardware binary pHash search (zero false negatives for minor edits)
+    bin_recall_indices: list[int] = []
+    bin_dists, bin_ids = indexer.search_binary(
+        query_phash, k=settings.binary_recall_k, datasource=target_ds
+    )
+    for d, idx in zip(bin_dists, bin_ids):
+        if d <= settings.binary_hamming_threshold:
+            bin_recall_indices.append(idx)
+        else:
+            break
+
+    # Union candidates preserving vector ranking priority
+    seen_ids = set()
+    merged_indices: list[int] = []
+    merged_distances: list[float] = []
+
+    for idx in vec_indices:
+        if idx not in seen_ids:
+            seen_ids.add(idx)
+            merged_indices.append(idx)
+            merged_distances.append(vec_dist_map.get(idx, 1.0))
+
+    for idx in bin_recall_indices:
+        if idx not in seen_ids:
+            seen_ids.add(idx)
+            merged_indices.append(idx)
+            merged_distances.append(0.5)
+
+    indices = merged_indices
+    distances = merged_distances
 
     t1 = time.perf_counter()
     stages["faiss"] = {
@@ -312,6 +355,12 @@ def search(
         "out": len(indices),
         "elapsed_ms": round((t1 - t0) * 1000, 3),
         "datasource": target_ds,
+    }
+    stages["dual_recall"] = {
+        "vector_count": len(vec_indices),
+        "binary_count": len(bin_recall_indices),
+        "union_count": len(indices),
+        "elapsed_ms": round((t1 - t0) * 1000, 3),
     }
 
     if not indices:
@@ -425,17 +474,17 @@ def search(
         return _build_response(candidates[:top_k], stages, t0, datasource=target_ds)
 
     # ==================================================================
-    # Stage 4: SSIM filter (most expensive, runs on pHash survivors)
+    # Stage 4: Verification filter (DiffMask / SSIM, runs on pHash survivors)
     # ==================================================================
-    def _ssim_check(c: SearchCandidate) -> SearchCandidate:
+    def _verify_check(c: SearchCandidate) -> SearchCandidate:
         cpath = c.meta.get("path", "")
         rot_idx = c.best_rotation
         query_candidate_img = (
             rotate_image(image, rot_idx) if (rotation_invariant and rot_idx) else image
         )
-        ok, score = _passes_ssim(query_candidate_img, cpath, ssim_threshold)
-        c.ssim_score = round(score, 4)
-        if ok:
+        v_res = active_verifier.verify_path(query_candidate_img, cpath)
+        c.ssim_score = v_res.score
+        if v_res.passed:
             c.stages_passed += 1
         return c
 
@@ -462,19 +511,22 @@ def search(
             )
             break
         budget -= 1
-        res_c = _ssim_check(c)
+        res_c = _verify_check(c)
         checked.append(res_c)
         if res_c.stages_passed >= 3:
             confirmed.append(res_c)
 
     t4 = time.perf_counter()
-    stages["ssim"] = {
+    verify_stats = {
+        "verifier": type(active_verifier).__name__,
         "in": len(phash_survivors),
         "evaluated": len(checked),
         "out": len(confirmed),
         "short_circuited": short_circuited,
         "elapsed_ms": round((t4 - t3) * 1000, 3),
     }
+    stages["verify"] = verify_stats
+    stages["ssim"] = verify_stats  # backward compatibility
 
     # Merge survivors back into full candidate list for ranking
     finalized = {c.id: c for c in candidates}
