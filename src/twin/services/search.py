@@ -218,8 +218,9 @@ def search(
         image = single2double(image)
 
     # ==================================================================
-    # Stage 1: Semantic retrieval (Faiss top-K)
+    # Stage 1: Semantic retrieval (Faiss recall)
     # ==================================================================
+    recall_k = max(top_k * 5, 50)
     query_dhash = compute_dhash(image)
     query_phash = compute_phash(image)
 
@@ -231,17 +232,17 @@ def search(
         # Query Faiss for each rotation and merge candidate pools taking minimum distance
         best_candidate_distances: dict[int, float] = {}
         for vec in query_vecs:
-            dists, idxs = indexer.search(vec, k=top_k, datasource=target_ds)
+            dists, idxs = indexer.search(vec, k=recall_k, datasource=target_ds)
             for d, idx in zip(dists, idxs):
                 if idx not in best_candidate_distances or d < best_candidate_distances[idx]:
                     best_candidate_distances[idx] = float(d)
 
-        sorted_candidates = sorted(best_candidate_distances.items(), key=lambda x: x[1])[:top_k]
+        sorted_candidates = sorted(best_candidate_distances.items(), key=lambda x: x[1])[:recall_k]
         indices = [idx for idx, _ in sorted_candidates]
         distances = [d for _, d in sorted_candidates]
     else:
         query_vec = compute_embedding(image)
-        distances, indices = indexer.search(query_vec, k=top_k, datasource=target_ds)
+        distances, indices = indexer.search(query_vec, k=recall_k, datasource=target_ds)
 
     t1 = time.perf_counter()
     stages["faiss"] = {
@@ -316,7 +317,7 @@ def search(
         # No dHash survivors — everything goes to "none" tier
         _final_sort(candidates)
         logger.info("Search: %d candidates, 0 passed dHash", len(candidates))
-        return _build_response(candidates, stages, t0)
+        return _build_response(candidates[:top_k], stages, t0, datasource=target_ds)
 
     # ==================================================================
     # Stage 3: pHash filter (runs on dHash survivors)
@@ -359,10 +360,10 @@ def search(
         # dHash passed but pHash failed — "suspected" tier
         _final_sort(candidates)
         logger.info("Search: %d → %d dHash → 0 pHash", len(candidates), len(dhash_survivors))
-        return _build_response(candidates, stages, t0)
+        return _build_response(candidates[:top_k], stages, t0, datasource=target_ds)
 
     # ==================================================================
-    # Stage 4: SSIM filter (most expensive, runs on pHash survivors, parallel)
+    # Stage 4: SSIM filter (most expensive, runs on pHash survivors)
     # ==================================================================
     def _ssim_check(c: SearchCandidate) -> SearchCandidate:
         cpath = c.meta.get("path", "")
@@ -376,14 +377,40 @@ def search(
             c.stages_passed += 1
         return c
 
-    # SSIM on usually 2–5 candidates — simple loop, overhead of pool isn't worth it
-    checked = [_ssim_check(c) for c in phash_survivors]
+    # Budget-driven dynamic short-circuiting
+    checked: list[SearchCandidate] = []
+    confirmed: list[SearchCandidate] = []
+    budget = settings.verification_budget
+    short_circuited = False
 
-    confirmed = [c for c in checked if c.stages_passed >= 3]  # Faiss+dHash+pHash+SSIM
+    for c in phash_survivors:
+        if len(confirmed) >= top_k:
+            short_circuited = True
+            logger.info(
+                "Dynamic short-circuit: already confirmed %d items >= top_k (%d)",
+                len(confirmed),
+                top_k,
+            )
+            break
+        if budget <= 0:
+            short_circuited = True
+            logger.info(
+                "Verification budget (%d) exhausted, short-circuiting remaining candidates",
+                settings.verification_budget,
+            )
+            break
+        budget -= 1
+        res_c = _ssim_check(c)
+        checked.append(res_c)
+        if res_c.stages_passed >= 3:
+            confirmed.append(res_c)
+
     t4 = time.perf_counter()
     stages["ssim"] = {
         "in": len(phash_survivors),
+        "evaluated": len(checked),
         "out": len(confirmed),
+        "short_circuited": short_circuited,
         "elapsed_ms": round((t4 - t3) * 1000, 3),
     }
 
@@ -394,6 +421,7 @@ def search(
     final_list = list(finalized.values())
 
     _final_sort(final_list)
+    final_list = final_list[:top_k]
 
     elapsed = time.perf_counter() - t0
     logger.info(

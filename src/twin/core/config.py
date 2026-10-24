@@ -48,7 +48,9 @@ class Settings(BaseSettings):
 
     # --- Search ---
     top_k: int = 100
-    rotation_invariant: bool = True  # tolerate 0/90/180/270 deg rotation during dHash verification
+    rotation_invariant: bool = False  # MC UV orientation is fixed; 0° locked for efficiency
+    binary_recall_k: int = 1000  # candidate count from fast binary pHash retrieval
+    verification_budget: int = 200  # maximum candidate budget for expensive SSIM verification
     ahash_threshold: int = 10  # max Hamming distance for aHash pre-filter
     dhash_threshold: int = 10  # max Hamming distance for dHash duplicate
     phash_threshold: int = 12  # max Hamming distance for pHash duplicate
@@ -104,6 +106,14 @@ class Settings(BaseSettings):
 
     def _count_path_for(self, index_type: str, datasource: str | None = None) -> Path:
         return self._base_dir_for(datasource) / f"index.{index_type}.count"
+
+    @property
+    def binary_faiss_path(self) -> Path:
+        """Binary Faiss index file (default datasource)."""
+        return self._binary_faiss_path_for(datasource="skin")
+
+    def _binary_faiss_path_for(self, datasource: str | None = None) -> Path:
+        return self._base_dir_for(datasource) / "index.binary.faiss"
 
     @property
     def legacy_faiss_path(self) -> Path:

@@ -22,6 +22,17 @@ from twin.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def phash_to_binary_bytes(phash_hex: str) -> np.ndarray:
+    """Convert 16-character hex pHash string to 8-byte uint8 numpy vector."""
+    if not phash_hex or len(phash_hex) != 16:
+        return np.zeros(8, dtype=np.uint8)
+    try:
+        raw = bytes.fromhex(phash_hex)
+        return np.frombuffer(raw, dtype=np.uint8)
+    except Exception:
+        return np.zeros(8, dtype=np.uint8)
+
+
 class Indexer:
     """Thread-safe Faiss index with metadata persistence and optional GPU.
 
@@ -50,6 +61,9 @@ class Indexer:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._indices: dict[str, faiss.Index | None] = {ds: None for ds in self.KNOWN_DATASOURCES}
+        self._binary_indices: dict[str, faiss.IndexBinaryFlat | None] = {
+            ds: None for ds in self.KNOWN_DATASOURCES
+        }
         self._metadatas: dict[str, list[dict]] = {ds: [] for ds in self.KNOWN_DATASOURCES}
         self._dirty_flags: dict[str, bool] = {ds: False for ds in self.KNOWN_DATASOURCES}
         self._stop_event = threading.Event()
@@ -77,6 +91,14 @@ class Indexer:
     @_index.setter
     def _index(self, val: faiss.Index | None) -> None:
         self._indices[self.DEFAULT_DATASOURCE] = val
+
+    @property
+    def _binary_index(self) -> faiss.IndexBinaryFlat | None:
+        return self._binary_indices.get(self.DEFAULT_DATASOURCE)
+
+    @_binary_index.setter
+    def _binary_index(self, val: faiss.IndexBinaryFlat | None) -> None:
+        self._binary_indices[self.DEFAULT_DATASOURCE] = val
 
     @property
     def _metadata(self) -> list[dict]:
@@ -330,6 +352,10 @@ class Indexer:
         idx = self._maybe_to_gpu(idx)
         return idx
 
+    def _create_binary_index(self) -> faiss.IndexBinaryFlat:
+        """Create a 64-bit IndexBinaryFlat for fast pHash Hamming search."""
+        return faiss.IndexBinaryFlat(64)
+
     @staticmethod
     def _resolve_nlist(n: int) -> int:
         """Compute nlist for IVF index."""
@@ -382,6 +408,7 @@ class Indexer:
             faiss_path = settings._faiss_path_for(settings.faiss_index_type, datasource=ds)
             meta_path = settings._metadata_path_for(settings.faiss_index_type, datasource=ds)
             count_path = self._count_path_for(settings.faiss_index_type, datasource=ds)
+            bin_path = settings._binary_faiss_path_for(datasource=ds)
             faiss_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Safety check: never overwrite a valid index with fewer vectors.
@@ -404,6 +431,7 @@ class Indexer:
             faiss_tmp = str(faiss_path) + ".tmp"
             meta_tmp = str(meta_path) + ".tmp"
             count_tmp = str(count_path) + ".tmp"
+            bin_tmp = str(bin_path) + ".tmp"
 
             try:
                 cpu_idx = self._maybe_to_cpu(idx_obj)
@@ -415,6 +443,12 @@ class Indexer:
                 count_tmp_path = Path(count_tmp)
                 count_tmp_path.write_text(str(n))
 
+                # Binary pHash index persistence
+                bin_idx = self._binary_indices.get(ds)
+                if bin_idx is not None and bin_idx.ntotal > 0:
+                    faiss.write_index_binary(bin_idx, bin_tmp)
+                    _os.replace(bin_tmp, str(bin_path))
+
                 # Atomic rename — this is the commit point
                 _os.replace(faiss_tmp, str(faiss_path))
                 _os.replace(meta_tmp, str(meta_path))
@@ -423,7 +457,7 @@ class Indexer:
                 self._dirty_flags[ds] = False
                 logger.info("Saved %s index (%d vectors) to %s", ds, n, faiss_path)
             finally:
-                for tmp in (faiss_tmp, meta_tmp, count_tmp):
+                for tmp in (faiss_tmp, meta_tmp, count_tmp, bin_tmp):
                     if _os.path.exists(tmp):
                         _os.unlink(tmp)
 
@@ -537,6 +571,46 @@ class Indexer:
                     self._metadatas[ds] = []
                     self._dirty_flags[ds] = False
 
+                # Load or rebuild binary pHash index
+                bin_path = settings._binary_faiss_path_for(datasource=ds)
+                bin_loaded = False
+                if bin_path.exists():
+                    try:
+                        self._binary_indices[ds] = faiss.read_index_binary(str(bin_path))
+                        bin_loaded = True
+                        logger.info(
+                            "  ✓ Loaded binary index for '%s' (%d items)",
+                            ds,
+                            self._binary_indices[ds].ntotal,
+                        )
+                    except Exception as e:
+                        logger.warning("  ✗ Corrupt binary index for '%s': %s", ds, e)
+                        self._binary_indices[ds] = None
+
+                meta_len = len(self._metadatas.get(ds, []))
+                bin_count = (
+                    self._binary_indices[ds].ntotal
+                    if self._binary_indices.get(ds) is not None
+                    else 0
+                )
+                if not bin_loaded or bin_count != meta_len:
+                    bin_idx = self._create_binary_index()
+                    if meta_len > 0:
+                        bin_vecs = np.stack(
+                            [
+                                phash_to_binary_bytes(m.get("phash", ""))
+                                for m in self._metadatas[ds]
+                            ]
+                        )
+                        bin_idx.add(bin_vecs)
+                        self._dirty_flags[ds] = True
+                    self._binary_indices[ds] = bin_idx
+                    logger.info(
+                        "  ✓ Initialized binary index for '%s' (%d items from metadata)",
+                        ds,
+                        bin_idx.ntotal,
+                    )
+
     def save(self) -> None:
         """Persist index and metadata to disk (thread-safe, acquires lock)."""
         with self._lock:
@@ -556,6 +630,7 @@ class Indexer:
             for ds in targets:
                 self._indices[ds] = None
                 self._indices[ds] = self._create_index(datasource=ds)
+                self._binary_indices[ds] = self._create_binary_index()
                 self._metadatas[ds] = []
                 self._dirty_flags[ds] = False
 
@@ -563,10 +638,12 @@ class Indexer:
                     self._count_path_for(t, datasource=ds)
                     for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
                 ]
+                bin_p = settings._binary_faiss_path_for(datasource=ds)
                 for p in (
                     settings.all_type_faiss_paths(datasource=ds)
                     + settings.all_type_metadata_paths(datasource=ds)
                     + count_paths
+                    + [bin_p]
                 ):
                     if p.exists():
                         p.unlink()
@@ -576,11 +653,16 @@ class Indexer:
                     self._count_path_for(t, datasource=None)
                     for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
                 ]
+                legacy_bin_p = settings._binary_faiss_path_for(datasource=None)
                 for p in (
                     settings.all_type_faiss_paths(datasource=None)
                     + settings.all_type_metadata_paths(datasource=None)
                     + legacy_count_paths
-                    + [settings.legacy_faiss_path, settings.legacy_metadata_path]
+                    + [
+                        settings.legacy_faiss_path,
+                        settings.legacy_metadata_path,
+                        legacy_bin_p,
+                    ]
                 ):
                     if p.exists():
                         p.unlink()
@@ -601,6 +683,15 @@ class Indexer:
 
             idx = idx_obj.ntotal
             idx_obj.add(vector.reshape(1, -1).astype(np.float32))
+
+            # Add to binary pHash index
+            bin_idx = self._binary_indices.get(datasource)
+            if bin_idx is None:
+                bin_idx = self._create_binary_index()
+                self._binary_indices[datasource] = bin_idx
+            bin_vec = phash_to_binary_bytes(meta.get("phash", ""))
+            bin_idx.add(bin_vec.reshape(1, 8))
+
             meta["id"] = idx
             meta["datasource"] = datasource
             self._metadatas[datasource].append(meta)
@@ -628,6 +719,15 @@ class Indexer:
 
             start_id = idx_obj.ntotal
             idx_obj.add(vectors.astype(np.float32))
+
+            # Add to binary pHash index
+            bin_idx = self._binary_indices.get(datasource)
+            if bin_idx is None:
+                bin_idx = self._create_binary_index()
+                self._binary_indices[datasource] = bin_idx
+            bin_vecs = np.stack([phash_to_binary_bytes(m.get("phash", "")) for m in metas])
+            bin_idx.add(bin_vecs)
+
             ids = []
             for i, meta in enumerate(metas):
                 assigned = start_id + i
@@ -745,6 +845,28 @@ class Indexer:
                 idx_obj.hnsw.efSearch = settings.faiss_hnsw_ef_search
 
             distances, indices = idx_obj.search(query.reshape(1, -1).astype(np.float32), k)
+            return distances[0].tolist(), indices[0].tolist()
+
+    def search_binary(
+        self,
+        query_phash_hex: str,
+        k: int | None = None,
+        datasource: str = DEFAULT_DATASOURCE,
+    ) -> tuple[list[int], list[int]]:
+        """Search for k nearest neighbors using 64-bit binary pHash index.
+
+        Returns (hamming_distances, ids).
+        """
+        if k is None:
+            k = settings.binary_recall_k
+
+        with self._lock:
+            bin_idx = self._binary_indices.get(datasource)
+            if bin_idx is None or bin_idx.ntotal == 0:
+                return [], []
+            k = min(k, bin_idx.ntotal)
+            q_vec = phash_to_binary_bytes(query_phash_hex).reshape(1, 8)
+            distances, indices = bin_idx.search(q_vec, k)
             return distances[0].tolist(), indices[0].tolist()
 
     # ------------------------------------------------------------------
