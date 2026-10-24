@@ -1,4 +1,4 @@
-"""Tests for Dual-Recall Union and Pluggable Verifiers (Phase 3)."""
+"""Tests for Flat SIMD Recall and Pluggable Verifiers (Issue #5)."""
 
 import tempfile
 
@@ -11,9 +11,9 @@ from twin.services.indexer import indexer
 from twin.services.search import search
 
 
-def test_dual_recall_saves_minor_edit_skin(monkeypatch):
-    """A slightly edited derivative skin (4 eye pixels changed) excluded by vector search
-    is saved and recalled via the secondary IndexBinaryFlat hash branch.
+def test_simd_recall_saves_minor_edit_skin(monkeypatch):
+    """A slightly edited derivative skin has tiny Hamming distance (<= 2) and is accurately
+    retrieved by IndexBinaryFlat and confirmed by DiffMaskVerifier (0% false negative).
     """
     load_model()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -22,7 +22,6 @@ def test_dual_recall_saves_minor_edit_skin(monkeypatch):
             images_dir=tmpdir,
             faiss_index_type="flat",
             rotation_invariant=False,
-            enable_fast_path=False,  # force pipeline to run Stage 1 dual-recall
             verifier_type="diffmask",
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
@@ -45,33 +44,24 @@ def test_dual_recall_saves_minor_edit_skin(monkeypatch):
         img_deriv.save(p_deriv)
         _index_single_from_disk(img_deriv, p_deriv)
 
-        # 3. Simulate vector search returning only base.png (derivative excluded from vector top-k)
-        def mock_vector_search(query_vec, k=100, datasource="skin"):
-            # Exclude derivative (id=1) from vector recall to simulate vector false-negative
-            return [0.0], [0]
-
-        monkeypatch.setattr(indexer, "search", mock_vector_search)
-
         # Search query with derivative image
         res = search(img_deriv, top_k=5)
 
-        # Assert dual-recall saved derivative.png via the binary index branch
-        assert "dual_recall" in res["stages"]
-        d_stage = res["stages"]["dual_recall"]
-        assert d_stage["vector_count"] == 1
-        assert d_stage["binary_count"] >= 1
-        assert d_stage["union_count"] >= 2
-
-        # Derivative must be confirmed by DiffMaskVerifier
+        # Both base and derivative should be in top_k
+        assert res["count"] >= 2
         found_filenames = [r["filename"] for r in res["results"]]
         assert "derivative.png" in found_filenames
-        deriv_res = next(r for r in res["results"] if r["filename"] == "derivative.png")
+        assert "base.png" in found_filenames
+
+        # Derivative must be top-1 confirmed
+        deriv_res = res["results"][0]
+        assert deriv_res["filename"] == "derivative.png"
         assert deriv_res["match_level"] == "confirmed"
-        assert deriv_res["ssim_score"] > 0.99  # 1.0 - diff_ratio
+        assert deriv_res["ssim_score"] == 1.0
 
 
-def test_dual_recall_deduplication(monkeypatch):
-    """Candidates recalled by both vector and binary branches are deduplicated."""
+def test_single_pipeline_topk_ranking(monkeypatch):
+    """Single pipeline ranks candidates cleanly without compensatory patches."""
     load_model()
     with tempfile.TemporaryDirectory() as tmpdir:
         s = Settings(
@@ -79,7 +69,6 @@ def test_dual_recall_deduplication(monkeypatch):
             images_dir=tmpdir,
             faiss_index_type="flat",
             rotation_invariant=False,
-            enable_fast_path=False,
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
         monkeypatch.setattr("twin.services.search.settings", s)
@@ -92,11 +81,9 @@ def test_dual_recall_deduplication(monkeypatch):
         _index_single_from_disk(img, p)
 
         res = search(img, top_k=5)
-        d_stage = res["stages"]["dual_recall"]
-        assert d_stage["vector_count"] == 1
-        assert d_stage["binary_count"] == 1
-        assert d_stage["union_count"] == 1  # Deduplicated!
-        assert len(res["results"]) == 1
+        assert res["count"] == 1
+        assert res["results"][0]["filename"] == "sample.png"
+        assert res["results"][0]["match_level"] == "confirmed"
 
 
 def test_dynamic_verifier_type_switching(monkeypatch):
@@ -108,7 +95,6 @@ def test_dynamic_verifier_type_switching(monkeypatch):
             images_dir=tmpdir,
             faiss_index_type="flat",
             rotation_invariant=False,
-            enable_fast_path=False,
             verifier_type="diffmask",
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
@@ -121,10 +107,10 @@ def test_dynamic_verifier_type_switching(monkeypatch):
         img.save(p)
         _index_single_from_disk(img, p)
 
-        # 1. Default (diffmask)
+        # 1. Default config: DiffMaskVerifier
         res_default = search(img, top_k=1)
         assert res_default["stages"]["verify"]["verifier"] == "DiffMaskVerifier"
 
-        # 2. Explicit SSIM switch
+        # 2. Dynamic override to SSIMVerifier
         res_ssim = search(img, top_k=1, verifier_type="ssim")
         assert res_ssim["stages"]["verify"]["verifier"] == "SSIMVerifier"

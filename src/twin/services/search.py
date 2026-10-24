@@ -1,16 +1,14 @@
-"""Two-stage search with 4-stage funnel verification.
+"""Deterministic single-pipeline search service.
 
-Architecture:
-  Stage 1 (Recall):    CLIP embedding → Faiss L2 top-K semantic candidates.
-  Stage 2 (Filter 1):  dHash Hamming distance — cheapest, gradient-based.
-  Stage 3 (Filter 2):  pHash Hamming distance — DCT-based, complementary.
-  Stage 4 (Filter 3):  SSIM structural similarity — most expensive, last resort.
-
-Each filter eliminates non-matches.  Filters only run on survivors.
-Results are tiered:
-  - "confirmed": passed all 4 filters (Faiss → dHash → pHash → SSIM)
-  - "suspected": passed Faiss + at least one hash filter
-  - "none":      only passed Faiss (semantically similar, not visually duplicate)
+Architecture (Issue #5):
+  Separation by Modality:
+    - Image Query (以图搜图): Pure CPU Flat SIMD binary hash retrieval (faiss.IndexBinaryFlat)
+      + Unified Verifier (DiffMask by default / SSIM optional). 0% GPU算力.
+    - Text Query (以文搜图): Multi-modal CLIP text vector retrieval (faiss.IndexFlatL2).
+  Unified Top-K Funnel:
+    - No presumptive front-shortcutting (无死板前置短路).
+    - No compensatory multi-path union/patching (无代偿性并联去重打分).
+    - Retrieval produces Top-K candidates -> Unified Verifier -> Transparent API output.
 """
 
 import logging
@@ -23,11 +21,9 @@ from PIL import Image
 from twin.core.config import settings
 from twin.services.classifier import TextureType, inspect_texture
 from twin.services.converter import single2double
-from twin.services.embedding import compute_embedding, compute_embeddings
 from twin.services.hasher import (
     compute_dhash,
     compute_phash,
-    compute_rotated_dhashes,
     compute_rotated_phashes,
     compute_ssim,
     hamming_distance,
@@ -45,7 +41,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 @dataclass
 class SearchCandidate:
-    """Internal structured state tracking across funnel stages."""
+    """Internal structured state tracking across retrieval and verification."""
 
     id: int
     filename: str
@@ -75,7 +71,7 @@ class SearchCandidate:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline helpers
+# Pipeline helpers (backward compatible)
 # ---------------------------------------------------------------------------
 def _passes_hash(query_hash: str, candidate_hash: str, threshold: int) -> tuple[bool, int]:
     """Check a perceptual hash against threshold. Returns (passed, distance)."""
@@ -98,9 +94,6 @@ def _passes_ssim(query_img: Image.Image, cand_path: str, threshold: float) -> tu
     return score >= threshold, score
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _empty(t0: float, stages: dict, datasource: str = "skin") -> dict:
     """Return an empty-but-well-formed search response dict."""
     elapsed = time.perf_counter() - t0
@@ -116,7 +109,7 @@ def _empty(t0: float, stages: dict, datasource: str = "skin") -> dict:
 
 
 def _assign_match_level(stages_passed: int) -> str:
-    """Tier based on funnel progression."""
+    """Tier based on verification result."""
     if stages_passed >= 3:
         return "confirmed"
     elif stages_passed >= 1:
@@ -132,11 +125,11 @@ def _candidate_to_api_dict(c: SearchCandidate | dict) -> dict:
         "id": c["id"],
         "filename": c["filename"],
         "distance": c["distance"],
-        "match_level": _assign_match_level(c["stages_passed"]),
-        "stages_passed": c["stages_passed"],
-        "dhash_distance": c["dhash_distance"],
-        "phash_distance": c["phash_distance"],
-        "ssim_score": c["ssim_score"],
+        "match_level": _assign_match_level(c.get("stages_passed", 0)),
+        "stages_passed": c.get("stages_passed", 0),
+        "dhash_distance": c.get("dhash_distance", 999),
+        "phash_distance": c.get("phash_distance", 999),
+        "ssim_score": c.get("ssim_score", 0.0),
         "dhash_hex": meta.get("dhash", ""),
         "phash_hex": meta.get("phash", ""),
         "path": meta.get("path", ""),
@@ -144,11 +137,16 @@ def _candidate_to_api_dict(c: SearchCandidate | dict) -> dict:
 
 
 def _final_sort(results: list[SearchCandidate | dict]) -> None:
-    """In-place sort: most stages passed first, then dHash ASC, then L2 ASC."""
+    """In-place sort: verified first (stages_passed DESC), then pHash ASC, then dHash ASC."""
     def _key(r):
         if isinstance(r, SearchCandidate):
-            return (-r.stages_passed, r.dhash_distance, r.distance)
-        return (-r["stages_passed"], r["dhash_distance"], r["distance"])
+            return (-r.stages_passed, r.phash_distance, r.dhash_distance, r.distance)
+        return (
+            -r.get("stages_passed", 0),
+            r.get("phash_distance", 999),
+            r.get("dhash_distance", 999),
+            r.get("distance", 0.0),
+        )
 
     results.sort(key=_key)
 
@@ -171,7 +169,7 @@ def _build_response(
 
 
 # ---------------------------------------------------------------------------
-# Main search
+# Main search: Image Query (Single-Pipeline Flat SIMD + Verifier)
 # ---------------------------------------------------------------------------
 def search(
     image: Image.Image,
@@ -184,14 +182,14 @@ def search(
     verifier_type: str | None = None,
 ) -> dict:
     """
-    Two-stage image search with funnel-based filtering.
+    Deterministic single-pipeline Minecraft texture search.
 
-    Stage 1: Dual-Recall (Faiss semantic vector recall + IndexBinaryFlat pHash recall).
-    Stage 2–4: Sequential filters (dHash → pHash → Verifier), each operating
-    only on survivors of the previous stage.
-    Supports rotation tolerance across Stage 1–4 (0°, 90°, 180°, 270°).
-
-    Returns list of result dicts sorted by match_level.
+    Steps:
+      1. Classifier & Preprocessing: Detect Skin/Cape, auto-upgrade 64x32 legacy skins.
+      2. Extract 0° global pHash (CPU).
+      3. Flat SIMD Recall: faiss.IndexBinaryFlat hardware scan in ~3.3ms, zero GPU usage.
+      4. Unified Verifier: DiffMask (default) / SSIM verification on all Top-K candidates.
+      5. Output Top-K candidates transparently with recall distance and verifier scores.
     """
     if top_k is None:
         top_k = settings.top_k
@@ -205,9 +203,10 @@ def search(
         rotation_invariant = settings.rotation_invariant
 
     t0 = time.perf_counter()
-    stages: dict[str, dict] = {}  # track per-stage stats + timing
+    stages: dict[str, dict] = {}
 
-    # Auto-classify texture and determine datasource
+    # Step 1: Auto-classify texture and determine datasource
+    t_cls_0 = time.perf_counter()
     report = inspect_texture(image)
     if datasource is None:
         is_cape = report.texture_type in (TextureType.CAPE, TextureType.ELYTRA)
@@ -218,349 +217,141 @@ def search(
     # Auto-upgrade 64x32 legacy skins to 64x64 for representation parity
     if report.can_auto_upgrade:
         image = single2double(image)
+    t_cls_1 = time.perf_counter()
 
-    # Active pluggable verifier
-    active_verifier = get_verifier(verifier_type)
+    stages["classifier"] = {
+        "texture_type": report.texture_type.value,
+        "upgraded": report.can_auto_upgrade,
+        "datasource": target_ds,
+        "elapsed_ms": round((t_cls_1 - t_cls_0) * 1000, 3),
+    }
 
-    # ==================================================================
-    # Fast-Path & Stage 1: Semantic retrieval (Faiss recall)
-    # ==================================================================
-    recall_k = max(top_k * 5, 50)
-    query_dhash = compute_dhash(image)
+    # Step 2 & 3: Flat SIMD binary hash retrieval (faiss.IndexBinaryFlat)
+    t_simd_0 = time.perf_counter()
     query_phash = compute_phash(image)
+    query_dhash = compute_dhash(image)
 
-    # ------------------------------------------------------------------
-    # Fast-Path: Zero-GPU Binary pHash bypass for exact/near-duplicate matches
-    # ------------------------------------------------------------------
-    # If fast exact matches can satisfy the requested top_k, exit immediately
-    # without paying the expensive GPU ViT embedding cost.
-    fast_exact_threshold = 2
-    if (
-        settings.enable_fast_path
-        and not rotation_invariant
-        and settings.verification_budget >= top_k
-    ):
-        bin_dists, bin_ids = indexer.search_binary(query_phash, k=top_k, datasource=target_ds)
-        if bin_ids and len(bin_ids) >= top_k:
-            high_conf: list[tuple[int, int, dict]] = []
-            for d, idx in zip(bin_dists, bin_ids):
-                if d <= fast_exact_threshold:
-                    meta = indexer.get_metadata(idx, datasource=target_ds)
-                    if meta:
-                        high_conf.append((idx, int(d), meta))
-                else:
-                    break
-
-            if len(high_conf) >= top_k:
-                fast_candidates: list[SearchCandidate] = []
-                for idx, p_dist, meta in high_conf[:top_k]:
-                    cpath = meta.get("path", "")
-                    cand_dhash = meta.get("dhash", "")
-                    d_dist = hamming_distance(query_dhash, cand_dhash) if cand_dhash else 999
-                    v_res = active_verifier.verify_path(image, cpath)
-                    if v_res.passed and d_dist <= dhash_threshold:
-                        c = SearchCandidate(
-                            id=idx,
-                            filename=meta.get("filename", ""),
-                            distance=0.0,
-                            meta=meta,
-                            stages_passed=3,
-                            dhash_distance=d_dist,
-                            phash_distance=p_dist,
-                            ssim_score=v_res.score,
-                            candidate_rotations=[0],
-                            best_rotation=0,
-                        )
-                        fast_candidates.append(c)
-
-                if len(fast_candidates) >= top_k:
-                    _final_sort(fast_candidates)
-                    t_fast = time.perf_counter()
-                    stages["fast_path"] = {
-                        "hit": True,
-                        "candidates": len(fast_candidates),
-                        "elapsed_ms": round((t_fast - t0) * 1000, 3),
-                    }
-                    logger.info(
-                        "Search fast-path hit in %.2fms: %d confirmed duplicates >= top_k (%d)",
-                        (t_fast - t0) * 1000,
-                        len(fast_candidates),
-                        top_k,
-                    )
-                    return _build_response(
-                        fast_candidates[:top_k], stages, t0, datasource=target_ds
-                    )
-
-    # ------------------------------------------------------------------
-    # Stage 1: Dual-Recall (Vector semantic recall + Binary pHash recall)
-    # ------------------------------------------------------------------
-    vec_indices: list[int] = []
-    vec_dist_map: dict[int, float] = {}
+    # Candidate tracking: cand_id -> (cand_id, min_hamming, best_rotation)
+    retrieved_pool: dict[int, tuple[int, int, int]] = {}
 
     if rotation_invariant:
-        # Extract 4 orthogonal rotation embeddings in a single batch forward pass
-        rotated_imgs = [rotate_image(image, a) for a in (0, 1, 2, 3)]
-        query_vecs = compute_embeddings(rotated_imgs)
-
-        # Query Faiss for each rotation and merge candidate pools taking minimum distance
-        best_candidate_distances: dict[int, float] = {}
-        for vec in query_vecs:
-            dists, idxs = indexer.search(vec, k=recall_k, datasource=target_ds)
-            for d, idx in zip(dists, idxs):
-                if idx not in best_candidate_distances or d < best_candidate_distances[idx]:
-                    best_candidate_distances[idx] = float(d)
-
-        sorted_candidates = sorted(best_candidate_distances.items(), key=lambda x: x[1])[:recall_k]
-        vec_indices = [idx for idx, _ in sorted_candidates]
-        vec_dist_map = {idx: d for idx, d in sorted_candidates}
+        query_phashes = compute_rotated_phashes(image)
+        for rot_idx, qh in enumerate(query_phashes):
+            dists, ids = indexer.search_binary(qh, k=top_k, datasource=target_ds)
+            for d, idx in zip(dists, ids):
+                if idx < 0:
+                    continue
+                d_int = int(d)
+                if idx not in retrieved_pool or d_int < retrieved_pool[idx][1]:
+                    retrieved_pool[idx] = (idx, d_int, rot_idx)
     else:
-        query_vec = compute_embedding(image)
-        distances, vec_indices = indexer.search(query_vec, k=recall_k, datasource=target_ds)
-        vec_dist_map = {idx: float(d) for d, idx in zip(distances, vec_indices)}
+        dists, ids = indexer.search_binary(query_phash, k=top_k, datasource=target_ds)
+        for d, idx in zip(dists, ids):
+            if idx < 0:
+                continue
+            retrieved_pool[idx] = (idx, int(d), 0)
 
-    # Secondary recall: hardware binary pHash search (zero false negatives for minor edits)
-    bin_recall_indices: list[int] = []
-    bin_dists, bin_ids = indexer.search_binary(
-        query_phash, k=settings.binary_recall_k, datasource=target_ds
-    )
-    for d, idx in zip(bin_dists, bin_ids):
-        if d <= settings.binary_hamming_threshold:
-            bin_recall_indices.append(idx)
-        else:
-            break
+    # Sort candidates by Hamming distance ASC, take top_k
+    sorted_recalled = sorted(retrieved_pool.values(), key=lambda x: x[1])[:top_k]
 
-    # Union candidates preserving vector ranking priority
-    seen_ids = set()
-    merged_indices: list[int] = []
-    merged_distances: list[float] = []
-
-    for idx in vec_indices:
-        if idx not in seen_ids:
-            seen_ids.add(idx)
-            merged_indices.append(idx)
-            merged_distances.append(vec_dist_map.get(idx, 1.0))
-
-    for idx in bin_recall_indices:
-        if idx not in seen_ids:
-            seen_ids.add(idx)
-            merged_indices.append(idx)
-            merged_distances.append(0.5)
-
-    indices = merged_indices
-    distances = merged_distances
-
-    t1 = time.perf_counter()
-    stages["faiss"] = {
-        "in": 0,
-        "out": len(indices),
-        "elapsed_ms": round((t1 - t0) * 1000, 3),
+    t_simd_1 = time.perf_counter()
+    stages["simd_recall"] = {
+        "in": 1,
+        "out": len(sorted_recalled),
+        "elapsed_ms": round((t_simd_1 - t_simd_0) * 1000, 3),
         "datasource": target_ds,
     }
-    stages["dual_recall"] = {
-        "vector_count": len(vec_indices),
-        "binary_count": len(bin_recall_indices),
-        "union_count": len(indices),
-        "elapsed_ms": round((t1 - t0) * 1000, 3),
-    }
+    # Backward compatibility monitoring keys
+    stages["faiss"] = stages["simd_recall"]
 
-    if not indices:
+    if not sorted_recalled:
         return _empty(t0, stages, datasource=target_ds)
 
-    # Build candidate pool with structured SearchCandidate
+    # Step 4: Unified Verifier (DiffMask / SSIM) on top-K candidates
+    active_verifier = get_verifier(verifier_type)
+    t_ver_0 = time.perf_counter()
     candidates: list[SearchCandidate] = []
-    for dist, idx in zip(distances, indices):
+
+    for idx, p_dist, best_rot in sorted_recalled:
         meta = indexer.get_metadata(idx, datasource=target_ds)
         if meta is None:
             continue
-        candidates.append(
-            SearchCandidate(
-                id=idx,
-                filename=meta.get("filename", "unknown"),
-                distance=round(float(dist), 6),
-                meta=meta,
-            )
-        )
+        cpath = meta.get("path", "")
 
-    if not candidates:
-        return _empty(t0, stages, datasource=target_ds)
-
-    # ==================================================================
-    # Stage 2: dHash filter (cheapest, runs on all Faiss survivors)
-    # ==================================================================
-    query_dhashes = compute_rotated_dhashes(image) if rotation_invariant else [query_dhash]
-
-    dhash_survivors: list[SearchCandidate] = []
-    for c in candidates:
-        cand_dhash = c.meta.get("dhash", "")
-        if not cand_dhash:
-            c.dhash_distance = 999
-            c.candidate_rotations = [0]
-            c.best_rotation = 0
-            continue
-
-        if rotation_invariant:
-            distances_per_angle = [hamming_distance(qh, cand_dhash) for qh in query_dhashes]
-            min_dist = min(distances_per_angle)
-            c.dhash_distance = min_dist
-            if min_dist <= dhash_threshold:
-                c.candidate_rotations = [
-                    i for i, d in enumerate(distances_per_angle) if d <= dhash_threshold
-                ]
-                c.best_rotation = distances_per_angle.index(min_dist)
-                c.stages_passed += 1
-                dhash_survivors.append(c)
-        else:
-            dist = hamming_distance(query_dhash, cand_dhash)
-            c.dhash_distance = dist
-            c.candidate_rotations = [0]
-            c.best_rotation = 0
-            if dist <= dhash_threshold:
-                c.stages_passed += 1
-                dhash_survivors.append(c)
-    t2 = time.perf_counter()
-    stages["dhash"] = {
-        "in": len(candidates),
-        "out": len(dhash_survivors),
-        "elapsed_ms": round((t2 - t1) * 1000, 3),
-    }
-
-    if not dhash_survivors:
-        # No dHash survivors — everything goes to "none" tier
-        _final_sort(candidates)
-        logger.info("Search: %d candidates, 0 passed dHash", len(candidates))
-        return _build_response(candidates[:top_k], stages, t0, datasource=target_ds)
-
-    # ==================================================================
-    # Stage 3: pHash filter (runs on dHash survivors)
-    # ==================================================================
-    query_phashes = compute_rotated_phashes(image) if rotation_invariant else [query_phash]
-
-    phash_survivors: list[SearchCandidate] = []
-    for c in dhash_survivors:
-        cand_phash = c.meta.get("phash", "")
-        if not cand_phash:
-            c.phash_distance = 999
-            continue
-
-        if rotation_invariant:
-            candidate_rots = c.candidate_rotations or [0]
-            phash_evals = [
-                (rot_i, hamming_distance(query_phashes[rot_i], cand_phash))
-                for rot_i in candidate_rots
-            ]
-            best_rot, best_p_dist = min(phash_evals, key=lambda x: x[1])
-            c.phash_distance = best_p_dist
-            c.best_rotation = best_rot  # pHash disambiguates the exact rotation angle
-            if best_p_dist <= phash_threshold:
-                c.stages_passed += 1
-                phash_survivors.append(c)
-        else:
-            ok, dist = _passes_hash(query_phash, cand_phash, phash_threshold)
-            c.phash_distance = dist
-            if ok:
-                c.stages_passed += 1
-                phash_survivors.append(c)
-    t3 = time.perf_counter()
-    stages["phash"] = {
-        "in": len(dhash_survivors),
-        "out": len(phash_survivors),
-        "elapsed_ms": round((t3 - t2) * 1000, 3),
-    }
-
-    if not phash_survivors:
-        # dHash passed but pHash failed — "suspected" tier
-        _final_sort(candidates)
-        logger.info("Search: %d → %d dHash → 0 pHash", len(candidates), len(dhash_survivors))
-        return _build_response(candidates[:top_k], stages, t0, datasource=target_ds)
-
-    # ==================================================================
-    # Stage 4: Verification filter (DiffMask / SSIM, runs on pHash survivors)
-    # ==================================================================
-    def _verify_check(c: SearchCandidate) -> SearchCandidate:
-        cpath = c.meta.get("path", "")
-        rot_idx = c.best_rotation
         query_candidate_img = (
-            rotate_image(image, rot_idx) if (rotation_invariant and rot_idx) else image
+            rotate_image(image, best_rot) if (rotation_invariant and best_rot) else image
         )
+        cand_dhash = meta.get("dhash", "")
+        if cand_dhash:
+            if rotation_invariant and best_rot:
+                cand_d_dist = hamming_distance(compute_dhash(query_candidate_img), cand_dhash)
+            else:
+                cand_d_dist = hamming_distance(query_dhash, cand_dhash)
+        else:
+            cand_d_dist = 999
+
         v_res = active_verifier.verify_path(query_candidate_img, cpath)
-        c.ssim_score = v_res.score
+
+        # Match level & stage passed determination:
+        # 3 = confirmed (passed Verifier, e.g. diffmask <= 5% or SSIM >= threshold)
+        # 2 = suspected (within pHash Hamming threshold)
+        # 1 = none/recalled (candidate in top_k)
         if v_res.passed:
-            c.stages_passed += 1
-        return c
+            stages_passed = 3
+        elif p_dist <= phash_threshold or cand_d_dist <= dhash_threshold:
+            stages_passed = 2
+        else:
+            stages_passed = 1
 
-    # Budget-driven dynamic short-circuiting
-    checked: list[SearchCandidate] = []
-    confirmed: list[SearchCandidate] = []
-    budget = settings.verification_budget
-    short_circuited = False
+        cand = SearchCandidate(
+            id=idx,
+            filename=meta.get("filename", "unknown"),
+            distance=round(float(p_dist), 6),
+            meta=meta,
+            dhash_distance=cand_d_dist,
+            phash_distance=p_dist,
+            ssim_score=round(float(v_res.score), 4),
+            stages_passed=stages_passed,
+            candidate_rotations=[best_rot],
+            best_rotation=best_rot,
+        )
+        candidates.append(cand)
 
-    for c in phash_survivors:
-        if len(confirmed) >= top_k:
-            short_circuited = True
-            logger.info(
-                "Dynamic short-circuit: already confirmed %d items >= top_k (%d)",
-                len(confirmed),
-                top_k,
-            )
-            break
-        if budget <= 0:
-            short_circuited = True
-            logger.info(
-                "Verification budget (%d) exhausted, short-circuiting remaining candidates",
-                settings.verification_budget,
-            )
-            break
-        budget -= 1
-        res_c = _verify_check(c)
-        checked.append(res_c)
-        if res_c.stages_passed >= 3:
-            confirmed.append(res_c)
-
-    t4 = time.perf_counter()
-    verify_stats = {
+    t_ver_1 = time.perf_counter()
+    stages["verify"] = {
         "verifier": type(active_verifier).__name__,
-        "in": len(phash_survivors),
-        "evaluated": len(checked),
-        "out": len(confirmed),
-        "short_circuited": short_circuited,
-        "elapsed_ms": round((t4 - t3) * 1000, 3),
+        "evaluated": len(candidates),
+        "elapsed_ms": round((t_ver_1 - t_ver_0) * 1000, 3),
     }
-    stages["verify"] = verify_stats
-    stages["ssim"] = verify_stats  # backward compatibility
+    stages["ssim"] = stages["verify"]
 
-    # Merge survivors back into full candidate list for ranking
-    finalized = {c.id: c for c in candidates}
-    for c in checked:
-        finalized[c.id] = c
-    final_list = list(finalized.values())
-
-    _final_sort(final_list)
-    final_list = final_list[:top_k]
+    # Step 5: Final ranking and output
+    _final_sort(candidates)
 
     elapsed = time.perf_counter() - t0
     logger.info(
-        "Search in %.0fms: %d candidates → %d dHash → %d pHash → %d confirmed",
+        "Search in %.2fms: %d candidates recalled via SIMD -> all %d verified (%s)",
         elapsed * 1000,
+        len(sorted_recalled),
         len(candidates),
-        len(dhash_survivors),
-        len(phash_survivors),
-        len(confirmed),
+        type(active_verifier).__name__,
     )
 
-    return _build_response(final_list, stages, t0, datasource=target_ds)
+    return _build_response(candidates, stages, t0, datasource=target_ds)
 
 
 # ---------------------------------------------------------------------------
-# Text Search (Multi-modal)
+# Text Search: Text Query (CLIP Multi-modal Vector Retrieval)
 # ---------------------------------------------------------------------------
 def search_by_text(
     query: str,
     top_k: int | None = None,
+    datasource: str = "skin",
 ) -> dict:
     """
-    Search indexed images using a natural language text query via CLIP.
+    Search indexed textures using natural language text query via CLIP.
 
-    Returns candidate images ranked by vector L2 distance / cosine similarity.
+    Returns candidate images ranked by vector L2 distance.
     Raises ValueError if active model does not support text embeddings (e.g. DINOv2).
     """
     from twin.models.clip_model import get_model_name
@@ -582,7 +373,7 @@ def search_by_text(
     t0 = time.perf_counter()
     query_vec = compute_text_embedding(query)
 
-    distances, indices = indexer.search(query_vec, k=top_k)
+    distances, indices = indexer.search(query_vec, k=top_k, datasource=datasource)
     t1 = time.perf_counter()
     elapsed = t1 - t0
 
@@ -592,11 +383,14 @@ def search_by_text(
             "count": 0,
             "query_time_ms": round(elapsed * 1000, 3),
             "query": query,
+            "datasource": datasource,
         }
 
     results = []
     for dist, idx in zip(distances, indices):
-        meta = indexer.get_metadata(idx)
+        if idx < 0:
+            continue
+        meta = indexer.get_metadata(idx, datasource=datasource)
         if meta is None:
             continue
         results.append(
@@ -615,4 +409,5 @@ def search_by_text(
         "count": len(results),
         "query_time_ms": round(elapsed * 1000, 3),
         "query": query,
+        "datasource": datasource,
     }

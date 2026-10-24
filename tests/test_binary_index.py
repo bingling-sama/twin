@@ -105,17 +105,15 @@ def test_binary_index_persistence_and_auto_rebuild(monkeypatch):
         assert dists3 == [0]
 
 
-def test_dynamic_short_circuiting(monkeypatch):
-    """Stage 4 short-circuits when confirmed count hits top_k or budget is exhausted."""
+def test_unified_topk_verifier_pipeline(monkeypatch):
+    """Unified Top-K pipeline evaluates exact Top-K candidates without early truncation."""
     load_model()
     with tempfile.TemporaryDirectory() as tmpdir:
         s = Settings(
             index_path=tmpdir,
             images_dir=tmpdir,
             faiss_index_type="flat",
-            verification_budget=1,
             rotation_invariant=False,
-            enable_fast_path=False,
         )
         monkeypatch.setattr("twin.services.indexer.settings", s)
         monkeypatch.setattr("twin.services.search.settings", s)
@@ -135,24 +133,18 @@ def test_dynamic_short_circuiting(monkeypatch):
             img.save(p)
             _index_single_from_disk(img, p)
 
-        # 1. Test budget exhaustion short-circuit
-        res_budget = search(img, top_k=5)
-        ssim_stage = res_budget["stages"]["ssim"]
-        assert ssim_stage["short_circuited"] is True
-        assert ssim_stage["evaluated"] == 1  # budget was 1
+        # 1. Test top_k=2 evaluates exactly 2 candidates
+        res_2 = search(img, top_k=2)
+        assert res_2["count"] == 2
+        assert len(res_2["results"]) == 2
+        assert res_2["stages"]["verify"]["evaluated"] == 2
 
-        # 2. Test top_k hit short-circuit with larger budget
-        s2 = Settings(
-            index_path=tmpdir,
-            images_dir=tmpdir,
-            faiss_index_type="flat",
-            verification_budget=50,
-            rotation_invariant=False,
-            enable_fast_path=False,
-        )
-        monkeypatch.setattr("twin.services.search.settings", s2)
-        res_topk = search(img, top_k=2)
-        ssim_topk = res_topk["stages"]["ssim"]
-        assert ssim_topk["short_circuited"] is True
-        assert ssim_topk["evaluated"] == 2
-        assert ssim_topk["out"] == 2
+        # 2. Test top_k=5 evaluates all 5 candidates
+        res_5 = search(img, top_k=5)
+        assert res_5["count"] == 5
+        assert len(res_5["results"]) == 5
+        assert res_5["stages"]["verify"]["evaluated"] == 5
+        # All identical images are confirmed
+        for item in res_5["results"]:
+            assert item["match_level"] == "confirmed"
+            assert item["phash_distance"] == 0
