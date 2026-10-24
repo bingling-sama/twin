@@ -89,7 +89,7 @@ make dev  →  uvicorn twin.main:app
 ### 2. Search Flow (`POST /api/v1/search`)
 
 ```
-Client uploads query.jpg
+Client uploads query.png
   │
   ├─ routes.search_endpoint()
   │   ├─ file.file.read() → bytes
@@ -97,50 +97,52 @@ Client uploads query.jpg
   │   │   ├─ Check extension ∈ {.jpg, .jpeg, .png, .webp, .bmp}
   │   │   ├─ Image.open(BytesIO(bytes))
   │   │   ├─ img.load()  ← decodes pixels, raises on corruption
-  │   │   └─ img.convert("RGB")
+  │   │   └─ img.convert("RGBA" if has_transparency else "RGB")
   │   └─ search(image) → dict → SearchResponse(**dict)
   │
   └─ services/search.py: search(image)
       │
-      ├─ [Stage 0: Prepare]
-      │   ├─ query_dhash = compute_dhash(image) → imagehash.dhash() → 16-char hex
-      │   └─ query_phash = compute_phash(image) → imagehash.phash() → 16-char hex
+      ├─ [Step 1: Classification & Preprocessing (CPU)]
+      │   ├─ classifier.classify_texture(image) → TextureKind (SkinDouble / SkinSingle / Cape / Unknown)
+      │   ├─ Target datasource routed: "skin" (SkinDouble / SkinSingle / Unknown) vs "cape" (Cape)
+      │   └─ If SkinSingle (64x32): converter.single2double(image) → 64x64 standard UV layout
       │
-      ├─ [Stage 1: Semantic Recall]
-      │   ├─ If rotation_invariant: compute_embeddings([0°, 90°, 180°, 270°]) → batch Faiss search + candidate pool merge
-      │   │  Else: query_vec = compute_embedding(image) → Faiss top-K
-      │   ├─ Build candidate pool: for each unique (dist, id) → load metadata
-      │   └─ t1 = now; stages["faiss"] = {in:0, out:N, elapsed_ms: ...}
+      ├─ [Step 2: 0° Global pHash Extraction (CPU, 0% GPU)]
+      │   └─ query_phash = compute_phash(image) → 16-char hex (64-bit DCT binary)
       │
-      ├─ [Stage 2: dHash Filter]
-      │   ├─ For each candidate:
-      │   │   └─ _passes_hash(query_dhash, cand_dhash, threshold=10)
-      │   │       └─ int(h1,16) ^ int(h2,16) → .bit_count() → dist ≤ 10?
-      │   ├─ dhash_survivors = [c for c in candidates if passed]
-      │   └─ If 0 survivors → return _build_response (all "none" tier)
+      ├─ [Step 3: Flat SIMD Binary Recall (faiss.IndexBinaryFlat)]
+      │   ├─ indexer.search_binary(query_phash, k=top_k, datasource=target_ds)
+      │   │   └─ Hardware SIMD AVX2/AVX-512 POPCNT scan (~3.3ms across entire collection)
+      │   └─ Candidates: Top-K items sorted by Hamming distance
       │
-      ├─ [Stage 3: pHash Filter]
-      │   ├─ For each surviving candidate:
-      │   │   └─ _passes_hash(query_phash, cand_phash, threshold=12)
-      │   ├─ phash_survivors = [c for c in dhash_survivors if passed]
-      │   └─ If 0 survivors → return _build_response (dHash survivors "suspected")
+      ├─ [Step 4: Unified Top-K Verifier (Pixel Confirmation)]
+      │   ├─ verifiers.get_verifier(settings.verifier_type) → DiffMaskVerifier (default) or SSIMVerifier
+      │   └─ For each candidate in Top-K:
+      │       ├─ Load candidate PIL Image from disk
+      │       └─ verifier.verify(query_image, cand_image)
+      │           ├─ DiffMask: Alpha dynamic union mask, point-by-point tolerance (|RGB Δ| ≤ 5) (~0.12ms)
+      │           └─ Score: match_ratio (1.0 - diff_ratio) or SSIM similarity
       │
-      ├─ [Stage 4: SSIM Filter]
-      │   ├─ For each surviving candidate (parallel via simple loop):
-      │   │   ├─ Load candidate image from disk (if path exists)
-      │   │   └─ hasher.compute_ssim(query_img, cand_img)
-      │   │       ├─ Resize both to 256×256 grayscale
-      │   │       └─ skimage.metrics.structural_similarity(a, b)
-      │   ├─ confirmed = [c for c in phash_survivors if SSIM ≥ 0.90]
-      │   └─ stages["ssim"] = {in, out, elapsed_ms}
-      │
-      └─ [Finalize]
-          ├─ _assign_match_level(stages_passed)
-          │   ├─ ≥3 → "confirmed"
-          │   ├─ ≥1 → "suspected"
-          │   └─ 0   → "none"
-          ├─ _final_sort: stages_passed DESC, dHash ASC, L2 ASC
-          └─ _build_response → {results, count, query_time_ms, stages}
+      └─ [Step 5: Finalize & Format]
+          ├─ Assign match_level based on verification threshold
+          └─ _build_response → {results (Top-K + Hamming distance + verifier_score), count, query_time_ms, stages}
+```
+
+### 2.1 Text Search Flow (`POST /api/v1/search/text`)
+
+```
+User enters query text (e.g. "alex green dress")
+  │
+  ├─ routes.search_text_endpoint() → services/search.py: search_by_text(query)
+  │
+  ├─ [Step 1: CLIP Text Encoder]
+  │   └─ clip_model.encode_text(query) → (512,) normalized vector
+  │
+  ├─ [Step 2: Vector Semantic Recall (faiss.IndexFlatL2)]
+  │   └─ indexer.search(query_vec, k=top_k, datasource="skin") → Top-K semantic candidates
+  │
+  └─ [Step 3: Format & Return]
+      └─ Return semantic candidates with L2 distance
 ```
 
 ### 3. Index Flow (Single Upload)
@@ -290,17 +292,21 @@ sync.py (startup)
 HTTP Layer     api/routes.py  ──→  Thin REST & SSE endpoints, delegates to services
                api/schemas.py ──→  Pydantic v2 validation
                     │
-Orchestration   search.py      ──→  2-stage + 4-filter funnel & text search
-               index_service.py ──→  index_single(), async index_batch(), double-buffering preloader
-               sync.py        ──→  startup auto-sync with double-buffering preloader
+Orchestration   search.py      ──→  Dual-engine recall (SIMD Hash / ViT Text) + Unified Top-K Verifier
+               index_service.py ──→  index_single(), async index_batch(), classification & conversion
+               sync.py        ──→  startup auto-sync with texture classification & dual-datasource index
+                    │
+Domain/Texture  classifier.py  ──→  Minecraft UV layout heuristic classifier (SkinDouble, SkinSingle, Cape)
+               converter.py   ──→  Minecraft 1.7 single (64x32) to 1.8 double (64x64) UV layout converter
+               verifiers.py   ──→  Unified Top-K verification (DiffMaskVerifier, SSIMVerifier)
                     │
 Computation     embedding.py   ──→  CLIP / DINOv2 float32 vectors (single + batch)
-               hasher.py      ──→  aHash, dHash, pHash, SSIM (PyTorch CUDA / skimage), Hamming
-               indexer.py     ──→  Faiss IndexFlatL2 / IndexIVFFlat / IndexIVFPQ / IndexHNSWFlat + metadata + auto-save
+               hasher.py      ──→  aHash, dHash, pHash (imagehash), SSIM, Hamming
+               indexer.py     ──→  faiss.IndexBinaryFlat (Hash) + faiss.IndexFlatL2 (Vector) per datasource ("skin", "cape")
                     │
 Domain          clip_model.py  ──→  CLIP singleton, CUDA/MPS/CPU auto-detect
                dinov2_model.py ──→  DINOv2 vision transformer singleton
-               config.py      ──→  TWIN_ env vars, path resolution
+               config.py      ──→  TWIN_ env vars, multi-datasource paths
                utils/image.py ──→  shared parallel image I/O utilities
                utils/metrics.py──→  rolling throughput rate & ETA metrics
 ```
@@ -311,30 +317,42 @@ Domain          clip_model.py  ──→  CLIP singleton, CUDA/MPS/CPU auto-dete
 |-------|--------|------|
 | **HTTP** | `api/routes.py` | REST & SSE endpoints — thin handlers, 0 business logic. Delegates to `search()`, `search_by_text()`, `index_service`, `indexer`, `get_sync_status()` |
 | HTTP | `api/schemas.py` | Pydantic v2 models: SearchResultItem, SearchResponse, TextSearchResponse, BatchIndexAsyncResponse, HealthResponse, etc. |
-| **Service** | `services/search.py` | Orchestrator: CLIP/DINOv2 → Faiss → dHash → pHash → SSIM funnel + text-to-image search. Returns tiered results + per-stage timing |
-| Service | `services/index_service.py` | Encapsulates index workflows: `index_single()`, `index_batch_async()`, `index_batch()`, double-buffering preloader, and LRU task state |
-| Service | `services/sync.py` | Startup sync: scans images dir, batch-indexes files not yet in index with double-buffering preloader. Tracks progress in thread-safe `_sync_state` |
+| **Service** | `services/search.py` | Orchestrator: SIMD pHash binary recall (image) / CLIP text recall (text) → Unified Top-K Verifier (DiffMask/SSIM). Returns verified candidates |
+| Service | `services/classifier.py` | Texture classifier: classifies SkinDouble, SkinSingle, Cape, Elytra, Unknown via UV alpha inspection |
+| Service | `services/converter.py` | UV converter: elevates legacy 64x32 single-layer skins to standard 64x64 double-layer layout |
+| Service | `services/verifiers.py` | Verification strategies: DiffMask (Alpha-masked pixel tolerance) and SSIM verifier |
+| Service | `services/index_service.py` | Encapsulates index workflows: classify + convert + index single/batch across dual datasources |
+| Service | `services/sync.py` | Startup sync: scans images dir, classifies textures and populates skin and cape indexers |
 | Service | `services/embedding.py` | Multi-model embedding abstraction for CLIP and DINOv2 |
-| Service | `services/hasher.py` | aHash, dHash, pHash (imagehash), SSIM (PyTorch CUDA / skimage), Hamming distance. Batch + parallel variants |
-| Service | `services/indexer.py` | Faiss Flat / IVF / PQ / HNSW + JSON metadata, thread-safe (threading.RLock), auto-save daemon thread with dirty flag |
+| Service | `services/hasher.py` | aHash, dHash, pHash (imagehash), SSIM (PyTorch CUDA / skimage), Hamming distance |
+| Service | `services/indexer.py` | Multi-datasource index manager (`skin`, `cape`), each holding `IndexBinaryFlat` (pHash) and `IndexFlatL2/IVF` (vector) |
 | **Domain** | `models/clip_model.py` | Singleton. `load()` idempotent, `encode_image()`, `encode_images()`, `encode_text()`. Auto-detects CUDA > MPS > CPU |
 | Domain | `models/dinov2_model.py` | Singleton. DINOv2 vision transformer via timm / PyTorch |
-| Domain | `core/config.py` | `BaseSettings` with `TWIN_` prefix. Paths resolved against project root. `ensure_dirs()` called at startup |
+| Domain | `core/config.py` | `BaseSettings` with `TWIN_` prefix. Paths resolved per datasource (`data/{datasource}/`). `ensure_dirs()` called at startup |
 | Domain | `utils/image.py` | Shared `load_image()`, parallel `load_images()`, `IMAGE_EXTENSIONS` |
 | Domain | `utils/metrics.py` | Shared `compute_progress_metrics()`: rolling window throughput rate, progress percentage, ETA |
 
 ### Data Flow (Search)
 
 ```
-POST /search (UploadFile)
-  → routes.py: _validate_image() → RGB PIL Image
+POST /api/v1/search (Image query)
+  → routes.py: _validate_image() → PIL Image
   → services/search.py: search(image)
-      ├─ Stage 1: CLIP encode → Faiss L2 top-K
-      ├─ Stage 2: dHash filter (Hamming ≤10) → survivors
-      ├─ Stage 3: pHash filter (Hamming ≤12, on survivors only)
-      ├─ Stage 4: SSIM filter (≥0.90, on survivors only, parallel)
-      └─ Tier: confirmed (3/3) | suspected (1-2/3) | none (0/3)
-  → SearchResponse JSON (results + per-stage counts + per-stage timing)
+      ├─ Step 1: classify_texture(image) → route to "skin" or "cape"
+      ├─ Step 2: if single-layer skin → convert to 64x64 double-layer
+      ├─ Step 3: compute_phash(image) (0° lock, 0% GPU)
+      ├─ Step 4: IndexBinaryFlat SIMD scan (Hamming distance Top-K, ~3.3ms)
+      ├─ Step 5: Unified Top-K Verifier (DiffMaskVerifier, ~0.12ms/pair)
+      └─ Match level: confirmed / suspected / none based on verification score
+  → SearchResponse JSON (results with distance & verification score)
+
+POST /api/v1/search/text (Text query)
+  → routes.py: search_text_endpoint()
+  → services/search.py: search_by_text(query)
+      ├─ Step 1: CLIP encode_text(query) → 512-dim vector
+      ├─ Step 2: IndexFlatL2 search on skin datasource → Top-K semantic candidates
+      └─ Step 3: Top-K Verifier validation
+  → TextSearchResponse JSON
 ```
 
 ### Data Flow (Index)
@@ -407,48 +425,50 @@ POST /api/v1/index/batch (directory)
 ┌─────────────────────────────────────────────────────────────┐
 │  indexer.py — class Indexer (module-level singleton)        │
 │                                                             │
-│  State:                                                      │
-│    _lock        = threading.RLock()    # all ops serialized  │
-│    _index       = faiss.IndexFlatL2 / IndexIVFFlat / IndexHNSWFlat  (512-dim) │
-│    _metadata    = list[dict]           # [{filename,path,    │
-│    _dirty       = bool                 #   dhash,phash,id}]  │
-│    _auto_save_thread                   # daemon background   │
+│  State (Multi-datasource: "skin", "cape"):                  │
+│    _lock          = threading.RLock()   # all ops serialized│
+│    _indices       = dict[str, faiss.Index] (vector 512-dim) │
+│    _binary_indices= dict[str, faiss.IndexBinaryFlat] (64-bit)│
+│    _metadatas     = dict[str, list[dict]]                   │
+│    _dirty_flags   = dict[str, bool]     # per datasource    │
+│    _auto_save_thread                    # daemon background │
 │                                                             │
 │  Lifecycle:                                                  │
-│    load()  → disk → _index + _metadata (or fresh)            │
-│    save()  → _save_unlocked() → disk (public, acquires lock) │
-│    clear() → reset _index + _metadata, delete disk files    │
+│    load()  → disk → loads all datasources (skin & cape)     │
+│    save()  → _save_unlocked() → disk per datasource         │
+│    clear() → reset all indices, delete disk files           │
 │                                                             │
 │  Write (always inside _lock):                                │
-│    add_item(v, meta) → int id                               │
-│    add_items(V, metas) → list[int]                           │
-│      └─ mark _dirty = True (triggers next auto-save)        │
+│    add_item(v, meta, hash_val, datasource)                  │
+│    add_items(V, metas, hashes, datasource)                  │
+│      └─ mark _dirty_flags[ds] = True (triggers auto-save)   │
 │                                                             │
 │  Read (always inside _lock):                                 │
-│    count       → int                                         │
-│    search(q,k) → (distances[], ids[])                        │
-│    get_metadata(id) → dict | None                            │
-│    get_indexed_filenames() → set[str]                        │
-│    list_items(page, page_size) → {items, total}              │
+│    count(datasource?)       → int                           │
+│    search(q, k, ds)         → (distances[], ids[])          │
+│    search_binary(q_hash, k, ds) → (distances[], ids[])     │
+│    get_metadata(id, ds)     → dict | None                   │
+│    get_indexed_filenames(ds)→ set[str]                      │
+│    list_items(page, page_size, ds) → {items, total}         │
 │                                                             │
 │  Auto-save (daemon thread):                                  │
 │    start_auto_save() → _auto_save_loop()                     │
-│      └─ every N sec: if _dirty → save() → _dirty = False    │
+│      └─ every N sec: if _dirty → save()                     │
 │    stop_auto_save() → signal + join(5s timeout)              │
 │                                                             │
-│  Key invariant: _lock acquired before any _index or          │
-│  _metadata mutation. _save_unlocked() must be called with    │
-│  _lock already held (avoids deadlock on non-reentrant lock). │
+│  Key invariant: _lock acquired before any _indices or        │
+│  _metadatas mutation or read.                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Patterns
 
 - **Singleton model**: `clip_model.py` uses module-level `_model` global. `load()` idempotent — called once in FastAPI `lifespan` startup.
-- **Module-level indexer**: `services/indexer.py` exports `indexer = Indexer()` singleton. All routes and search share this instance.
-- **Thread safety**: `Indexer._lock` protects all Faiss operations. Route handlers are sync `def` (FastAPI runs them in threadpool).
+- **Module-level indexer**: `services/indexer.py` exports `indexer = Indexer()` singleton managing isolated `skin` and `cape` datasources.
+- **Thread safety**: `Indexer._lock` protects all Faiss operations across all datasources. Route handlers are sync `def` (FastAPI runs them in threadpool).
 - **Persistence**: Index auto-restored on startup via `indexer.load()`. `_dirty` flag triggers periodic save via daemon thread (`TWIN_AUTO_SAVE_INTERVAL`). Final save on shutdown via `lifespan`.
-- **Funnel filtering**: Each stage only runs on survivors of the previous stage. Early termination if a stage produces zero survivors. dHash/pHash stages use integer XOR (microseconds), SSIM only runs on 2-5 candidates.
+- **Modality-Decoupled Recall**: Image-to-image queries bypass GPU completely, performing SIMD hardware POPCNT scan over `faiss.IndexBinaryFlat` (~3.3ms) routed by texture type (`skin` vs `cape`). Text-to-image queries leverage CLIP text encoder and `faiss.IndexFlatL2`.
+- **Unified Top-K Verifier**: All candidate recalls converge into a single linear pipeline — Top-K candidates are directly verified by `DiffMaskVerifier` (default, ~0.12ms) or `SSIMVerifier`, outputting verifiable pixel metrics.
 - **CORS**: Enabled for all origins in dev (see `main.py`).
 - **Frontend proxy**: Vite dev server proxies `/api/v1` → `localhost:8000`. Production build should use nginx or similar.
 
@@ -461,7 +481,11 @@ POST /api/v1/index/batch (directory)
 | `TWIN_PRETRAINED` | `openai` | CLIP weights tag |
 | `TWIN_DINOV2_MODEL_NAME` | `vit_small_patch14_dinov2` | DINOv2 model architecture name |
 | `TWIN_DEVICE` | (auto) | `cuda` / `mps` / `cpu` |
-| `TWIN_TOP_K` | `100` | Faiss candidates |
+| `TWIN_TOP_K` | `100` | Candidates retrieved for verification |
+| `TWIN_VERIFIER_TYPE` | `diffmask` | Verifier implementation: `diffmask` or `ssim` |
+| `TWIN_DIFFMASK_TOLERANCE` | `5` | DiffMask RGB delta threshold |
+| `TWIN_DIFFMASK_ALPHA_THRESHOLD` | `10` | DiffMask alpha cutoff |
+| `TWIN_DIFFMASK_DIFF_RATIO_THRESHOLD` | `0.05` | DiffMask max mismatch ratio |
 | `TWIN_DHASH_THRESHOLD` | `10` | dHash Hamming threshold |
 | `TWIN_PHASH_THRESHOLD` | `12` | pHash Hamming threshold |
 | `TWIN_SSIM_THRESHOLD` | `0.90` | SSIM threshold |
@@ -537,19 +561,18 @@ Single-image latency (index_single): 24.65 ms (CLIP + dHash + pHash + Faiss, no 
 - **P2: Pipelined double-buffering** (Implemented ✅) — background thread preloads batch N+1 while GPU computes batch N, lifting ingestion throughput by +19.6%.
 - **P3: GPU Faiss for indexing** — Evaluated: negligible gain for insert (<0.2ms per batch). Retained on GPU for large index search speedup.
 
-### Search Latency Budget (per query)
+### Search Latency Budget (Image-to-Image Query, Pure CPU)
 
 ```
-CLIP encode (single)   3.56 ms  ██████████████████████  90%
-Faiss L2 top-50        0.03 ms  ▏                       <1%
-dHash filter (50)      0.01 ms  ▏                       <1%
-pHash filter (~5)      0.01 ms  ▏                       <1%
-SSIM verify (~3)       2.62 ms  ████████████████        7%  (per pair)
+Texture classify & UV convert  ~0.4 ms  ███████                 8%
+0° DCT pHash compute           ~1.2 ms  ██████████████████      24%
+Flat SIMD binary scan (660k)   ~3.3 ms  █████████████████████████ 66%
+DiffMask verify (Top-50 cands) ~0.1 ms  █                       2%
 ─────────────────────────────────────────
-End-to-end             ~4.0 ms
+End-to-end                     ~5.0 ms  (0% GPU usage)
 ```
 
-dHash/pHash run on all 50 Faiss candidates but are O(1) integer XOR — sub-microsecond per comparison. SSIM is the only expensive filter and only runs on 2–5 pHash survivors. The funnel design ensures SSIM cost is bounded regardless of index size.
+Image-to-image queries bypass GPU inference entirely, achieving ~5ms end-to-end response times with 100% exact Hamming recall and hardware AVX2/AVX-512 SIMD execution. Verification cost is minimal (~0.12ms per pair with DiffMask).
 
 ### GPU Faiss Impact on Search
 

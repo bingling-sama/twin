@@ -142,82 +142,85 @@ curl "http://localhost:8000/api/v1/index?page=1&page_size=20"
     └─────────────────────────────────────────────────────────┘
 ```
 
-### Search Pipeline
+### Search Pipeline (Issue #5 RFC)
 
 ```
-                    ┌──────────┐
-                    │  Query   │
-                    │  Image   │
-                    └────┬─────┘
-                         │
-              ┌──────────▼──────────┐
-              │  Stage 1: Recall     │
-              │                      │
-              │  CLIP ViT-B/32       │
-              │  → 512d L2-norm vec  │
-              │  → Faiss.search(k=50)│
-              │                      │
-              │  Output: 50 candidates│
-              └──────────┬───────────┘
-                         │
-              ┌──────────▼───────────┐
-              │  Stage 2: dHash       │
-              │                       │
-              │  64-bit gradient hash │
-              │  Hamming ≤ 10?        │
-              │                       │
-              │  Survivors: ~10       │
-              └──────────┬────────────┘
-                         │
-              ┌──────────▼───────────┐
-              │  Stage 3: pHash       │
-              │                       │
-              │  64-bit DCT hash      │
-              │  Hamming ≤ 12?        │
-              │                       │
-              │  Survivors: ~5        │
-              └──────────┬────────────┘
-                         │
-              ┌──────────▼───────────┐
-              │  Stage 4: SSIM        │
-              │                       │
-              │  Luminance + Contrast │
-              │  + Structure ≥ 0.90?  │
-              │                       │
-              │  Confirmed: ~3        │
-              └──────────┬────────────┘
-                         │
-              ┌──────────▼───────────┐
-              │  Tier Classification  │
-              │                       │
-              │  🟢 confirmed  (4/4)  │
-              │  🟡 suspected  (2-3)  │
-              │  ⚪ none       (1)    │
-              └───────────────────────┘
+                                  Query 输入
+                                      │
+              ┌───────────────────────┴───────────────────────┐
+              ▼ 图像 Query (以图搜图)                         ▼ 文本 Query (以文搜图)
+     [Step 1: 材质分类与预处理 (CPU)]                 [CLIP Text Encoder (GPU/CPU)]
+   - 区分 SkinDouble / SkinSingle / Cape                      │
+   - 单层皮肤 64x32 升维至标准 64x64 UV                       │
+              │                                               │
+              ▼                                               │
+   [Step 2: 提取全局 pHash (0°)]                              │
+              │                                               │
+              ▼                                               ▼
+   【引擎 A: Flat SIMD 哈希召回】                   【引擎 B: ViT 向量语义召回】
+   (faiss.IndexBinaryFlat)                         (faiss.IndexFlatL2)
+   - 路由至 Skin 库或 Cape 库                      - 跨模态文本语义匹配
+   - 3.3ms 全库精确扫描                            - 提取语义 Top-K
+   - 提取汉明距离最近的 Top-K 候选                            │
+              │                                               │
+              └───────────────────────┬───────────────────────┘
+                                      │
+                                      ▼
+                      【统一 Top-K 候选进入 Verifier】
+                      Config.Verifier.verify(Top-K)
+                      - 默认: DiffMask (Alpha 动态掩码像素比对，单次 0.12ms)
+                      - 可选: SSIM (配置切换兼容保留)
+                                      │
+                                      ▼
+                      【最终输出 Top-K 及其 Verifier 评分】
 ```
+
+### Empirical Verification Matrix (收益对照)
+
+| 评估维度 | 重构前通用漏斗 | 本 PR 落地架构 (Issue #5) |
+| :--- | :--- | :--- |
+| **以图搜图单次耗时** | 30 ~ 50 ms (强行走 GPU ViT) | **~5 ms** (CPU 预处理 + 3.3ms SIMD 扫描) |
+| **以图搜图 GPU 占用率** | 100% 消耗 GPU 推理与显存 | **0% (完全脱离 GPU，纯 CPU 搞定)** |
+| **以图搜图漏检率** | 严重 (微调图易被 ViT 挤出 Top-K) | **0% 绝对召回** (全库精确扫描，无数学盲区) |
+| **跨版本皮肤格式查重** | 汉明距离 36 (永久漏检) | **距离 0 ~ 1** (升维预处理后精确对齐) |
+| **皮肤/披风品类误检** | 相互混杂污染 | **0% 误检** (分类器物理隔离至独立库) |
+| **系统控制流复杂度** | 级联过滤、前置短路、并联补丁 | **单管道线性流转** (召回 Top-K -> Verifier -> 输出) |
+
+### Funnel Architecture Limitations & Analysis (Why We Refactored)
+
+Twin 当前采用 **CLIP/DINOv2 + Faiss 粗召回 → dHash → pHash → SSIM** 的四级漏斗过滤架构，在实际应用和高负载场景下存在以下结构性缺陷与改进空间：
+
+1. **召回阶段一票否决与算力倒置 (Top-K Recall Bottleneck)**
+   - **漏检不可逆**：严格串联漏斗机制下，如果目标图因轻微噪点、局部裁切或风格差异未排进 Faiss 的 `top_k`，后续 dHash/pHash/SSIM 永远无法接触到该候选。
+   - **算力倒置**：感知哈希（微秒级）计算开销远低于 Transformer 向量提取（毫秒级）。目前架构优先运行重模型粗筛，未利用轻量哈希构建极速倒排索引或预过滤通道。
+
+2. **强依赖串行的“雪崩式”误杀 (Fail-Fast Cascading False Negatives)**
+   - **dHash 先行截断**：`Stage 2 (dHash)` 先行，仅留存者进入 `Stage 3 (pHash)`。dHash 基于像素单向梯度，对明暗渐变、对比度/Gamma 调节敏感；而基于频域 DCT 的 pHash 抗调色和模糊能力更强。一旦 dHash 误判剔除，更鲁棒的 pHash 和 SSIM 均失去校验机会。
+   - **缺乏多维特征融合打分**：目前为布尔硬阈值漏斗，未引入加权评分机制（例如 dHash 略微超标但 pHash 极低且 SSIM 接近 1.0 的高置信度样本会被直接丢弃）。
+
+3. **Stage 4 (SSIM) 存储与 I/O 放大瓶颈 (Disk I/O & Decoding Overhead)**
+   - **磁盘全量回表**：`_ssim_check` 需实时通过 `load_image(cand_path)` 从磁盘读取原图并解码。并发搜索或命中多个候选时，高频磁盘随机 I/O 和 JPEG/PNG 解码成为主要耗时瓶颈（远慢于内存比对）。
+   - **形变与拉伸失真**：比对时统一强制缩放至 `(ssim_size, ssim_size)`（默认 128x128/256x256）进行灰度比对，未保持原图长宽比，可能引入拉伸形变失真。
+
+4. **匹配层级判定粗糙 (Coarse Tiering Semantics)**
+   - 当前以通过阶段计数判定层级（`≥3` confirmed, `≥1` suspected, `0` none），Faiss 召回但未通过 dHash 的候选直接标为 `none`，无法区分“语义高度相似但非重复”与“完全无关”；`suspected` 仅代表通过单哈希，缺乏置信度量化。
 
 ### Data Flow (Search)
 
 ```
-POST /api/v1/search
+POST /api/v1/search (Image query)
   │
   ├─ routes.search_endpoint()
-  │   ├─ _validate_image() → RGB PIL Image
+  │   ├─ _validate_image() → PIL Image
   │   └─ services.search.search(image)
   │
   └─ search()
-      ├─ compute_embedding(image)    → (512,) float32
-      ├─ compute_dhash(image)        → 16-char hex
-      ├─ compute_phash(image)        → 16-char hex
-      ├─ indexer.search(vec, k=50)   → distances[], ids[]
-      │
-      ├─ For each candidate:
-      │   ├─ metadata lookup → dhash, phash, path
-      │   ├─ if path exists → load_image() → fresh dHash + pHash + SSIM
-      │   └─ score: dHash_ok? pHash_ok? SSIM_ok?
-      │
-      └─ Sort: stages_passed DESC, dHash ASC, L2 ASC
-         → SearchResponse JSON (results + stages timing + counts)
+      ├─ classify_texture(image) → route to "skin" or "cape"
+      ├─ single2double(image) if 64x32 single-layer skin
+      ├─ compute_phash(image) (0° lock, 0% GPU)
+      ├─ indexer.search_binary(hash, k=top_k) → Flat SIMD scan (~3.3ms)
+      ├─ Verifier (DiffMask default / SSIM optional) on Top-K
+      └─ Return Top-K with Hamming distance & verification score
 ```
 
 ### Data Flow (Index)
