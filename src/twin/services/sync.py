@@ -11,7 +11,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
+
 from twin.core.config import settings
+from twin.services.classifier import TextureType, inspect_texture
+from twin.services.converter import single2double
 from twin.services.embedding import compute_embeddings
 from twin.services.hasher import compute_ahashes, compute_dhashes, compute_phashes
 from twin.services.index_service import _index_single_from_disk
@@ -177,29 +181,56 @@ def sync_images_dir() -> dict:
                 continue
 
             try:
+                proc_imgs = []
+                ds_list = []
+                reports = []
+                for img in imgs:
+                    rep = inspect_texture(img)
+                    reports.append(rep)
+                    ds = (
+                        "cape"
+                        if rep.texture_type in (TextureType.CAPE, TextureType.ELYTRA)
+                        else "skin"
+                    )
+                    ds_list.append(ds)
+                    proc_imgs.append(single2double(img) if rep.can_auto_upgrade else img)
+
                 # Step 2: Batch CLIP embedding (one forward pass for the whole batch)
-                vectors = compute_embeddings(imgs)
+                vectors = compute_embeddings(proc_imgs)
 
                 # Step 3: Parallel aHash + dHash + pHash
-                ahashes = compute_ahashes(imgs)
-                dhashes = compute_dhashes(imgs)
-                phashes = compute_phashes(imgs)
+                ahashes = compute_ahashes(proc_imgs)
+                dhashes = compute_dhashes(proc_imgs)
+                phashes = compute_phashes(proc_imgs)
 
-                # Step 4: Build metadata and batch-add to index
-                metas = []
-                for path, ah, dh, ph in zip(ok_paths, ahashes, dhashes, phashes):
-                    metas.append(
+                # Step 4: Group by datasource and batch-add to index
+                groups: dict[str, tuple[list[np.ndarray], list[dict]]] = {}
+                for i, (path, ah, dh, ph, ds, rep) in enumerate(
+                    zip(ok_paths, ahashes, dhashes, phashes, ds_list, reports)
+                ):
+                    if ds not in groups:
+                        groups[ds] = ([], [])
+                    groups[ds][0].append(vectors[i])
+                    groups[ds][1].append(
                         {
                             "filename": path.name,
                             "path": str(path),
+                            "datasource": ds,
+                            "texture_type": rep.texture_type.value,
+                            "upgraded": rep.can_auto_upgrade,
                             "ahash": ah,
                             "dhash": dh,
                             "phash": ph,
                         }
                     )
 
-                indexer.add_items(vectors, metas)
-                indexed += len(metas)
+                for ds, (v_list, m_list) in groups.items():
+                    indexer.add_items(np.stack(v_list), m_list, datasource=ds)
+                    indexed += len(m_list)
+
+                for p_img, orig_img in zip(proc_imgs, imgs):
+                    if p_img is not orig_img:
+                        p_img.close()
 
                 pct = (indexed + skipped) * 100 // total_files
                 logger.info(

@@ -21,6 +21,8 @@ from pathlib import Path
 from PIL import Image
 
 from twin.core.config import settings
+from twin.services.classifier import TextureType, inspect_texture
+from twin.services.converter import single2double
 from twin.services.embedding import compute_embedding, compute_embeddings
 from twin.services.hasher import (
     compute_dhash,
@@ -88,6 +90,9 @@ def _passes_ssim(query_img: Image.Image, cand_path: str, threshold: float) -> tu
     cand_img = load_image(cand_path)
     if cand_img is None:
         return False, 0.0
+    cand_rep = inspect_texture(cand_img)
+    if cand_rep.can_auto_upgrade:
+        cand_img = single2double(cand_img)
     score = compute_ssim(query_img, cand_img)
     return score >= threshold, score
 
@@ -95,7 +100,7 @@ def _passes_ssim(query_img: Image.Image, cand_path: str, threshold: float) -> tu
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _empty(t0: float, stages: dict) -> dict:
+def _empty(t0: float, stages: dict, datasource: str = "skin") -> dict:
     """Return an empty-but-well-formed search response dict."""
     elapsed = time.perf_counter() - t0
     for s in stages.values():
@@ -103,6 +108,7 @@ def _empty(t0: float, stages: dict) -> dict:
     return {
         "results": [],
         "count": 0,
+        "datasource": datasource,
         "query_time_ms": round(elapsed * 1000, 3),
         "stages": stages,
     }
@@ -146,12 +152,18 @@ def _final_sort(results: list[SearchCandidate | dict]) -> None:
     results.sort(key=_key)
 
 
-def _build_response(results: list[SearchCandidate | dict], stages: dict, t0: float) -> dict:
+def _build_response(
+    results: list[SearchCandidate | dict],
+    stages: dict,
+    t0: float,
+    datasource: str = "skin",
+) -> dict:
     """Clean up internal keys and return API-ready dict."""
     elapsed = time.perf_counter() - t0
     return {
         "results": [_candidate_to_api_dict(c) for c in results],
         "count": len(results),
+        "datasource": datasource,
         "query_time_ms": round(elapsed * 1000, 3),
         "stages": stages,
     }
@@ -167,6 +179,7 @@ def search(
     phash_threshold: int | None = None,
     ssim_threshold: float | None = None,
     rotation_invariant: bool | None = None,
+    datasource: str | None = None,
 ) -> dict:
     """
     Two-stage image search with funnel-based filtering.
@@ -192,6 +205,18 @@ def search(
     t0 = time.perf_counter()
     stages: dict[str, dict] = {}  # track per-stage stats + timing
 
+    # Auto-classify texture and determine datasource
+    report = inspect_texture(image)
+    if datasource is None:
+        is_cape = report.texture_type in (TextureType.CAPE, TextureType.ELYTRA)
+        target_ds = "cape" if is_cape else "skin"
+    else:
+        target_ds = datasource
+
+    # Auto-upgrade 64x32 legacy skins to 64x64 for representation parity
+    if report.can_auto_upgrade:
+        image = single2double(image)
+
     # ==================================================================
     # Stage 1: Semantic retrieval (Faiss top-K)
     # ==================================================================
@@ -206,7 +231,7 @@ def search(
         # Query Faiss for each rotation and merge candidate pools taking minimum distance
         best_candidate_distances: dict[int, float] = {}
         for vec in query_vecs:
-            dists, idxs = indexer.search(vec, k=top_k)
+            dists, idxs = indexer.search(vec, k=top_k, datasource=target_ds)
             for d, idx in zip(dists, idxs):
                 if idx not in best_candidate_distances or d < best_candidate_distances[idx]:
                     best_candidate_distances[idx] = float(d)
@@ -216,18 +241,23 @@ def search(
         distances = [d for _, d in sorted_candidates]
     else:
         query_vec = compute_embedding(image)
-        distances, indices = indexer.search(query_vec, k=top_k)
+        distances, indices = indexer.search(query_vec, k=top_k, datasource=target_ds)
 
     t1 = time.perf_counter()
-    stages["faiss"] = {"in": 0, "out": len(indices), "elapsed_ms": round((t1 - t0) * 1000, 3)}
+    stages["faiss"] = {
+        "in": 0,
+        "out": len(indices),
+        "elapsed_ms": round((t1 - t0) * 1000, 3),
+        "datasource": target_ds,
+    }
 
     if not indices:
-        return _empty(t0, stages)
+        return _empty(t0, stages, datasource=target_ds)
 
     # Build candidate pool with structured SearchCandidate
     candidates: list[SearchCandidate] = []
     for dist, idx in zip(distances, indices):
-        meta = indexer.get_metadata(idx)
+        meta = indexer.get_metadata(idx, datasource=target_ds)
         if meta is None:
             continue
         candidates.append(
@@ -240,7 +270,7 @@ def search(
         )
 
     if not candidates:
-        return _empty(t0, stages)
+        return _empty(t0, stages, datasource=target_ds)
 
     # ==================================================================
     # Stage 2: dHash filter (cheapest, runs on all Faiss survivors)
@@ -375,7 +405,7 @@ def search(
         len(confirmed),
     )
 
-    return _build_response(final_list, stages, t0)
+    return _build_response(final_list, stages, t0, datasource=target_ds)
 
 
 # ---------------------------------------------------------------------------

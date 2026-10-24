@@ -44,11 +44,14 @@ class Indexer:
         "done",  # complete
     )
 
+    DEFAULT_DATASOURCE = "skin"
+    KNOWN_DATASOURCES = ("skin", "cape")
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._index: faiss.Index | None = None
-        self._metadata: list[dict] = []
-        self._dirty: bool = False
+        self._indices: dict[str, faiss.Index | None] = {ds: None for ds in self.KNOWN_DATASOURCES}
+        self._metadatas: dict[str, list[dict]] = {ds: [] for ds in self.KNOWN_DATASOURCES}
+        self._dirty_flags: dict[str, bool] = {ds: False for ds in self.KNOWN_DATASOURCES}
         self._stop_event = threading.Event()
         self._auto_save_thread: threading.Thread | None = None
 
@@ -65,16 +68,52 @@ class Indexer:
         }
 
     # ------------------------------------------------------------------
-    # Properties
+    # Properties & Datasource Accessors
     # ------------------------------------------------------------------
     @property
+    def _index(self) -> faiss.Index | None:
+        return self._indices.get(self.DEFAULT_DATASOURCE)
+
+    @_index.setter
+    def _index(self, val: faiss.Index | None) -> None:
+        self._indices[self.DEFAULT_DATASOURCE] = val
+
+    @property
+    def _metadata(self) -> list[dict]:
+        return self._metadatas.get(self.DEFAULT_DATASOURCE, [])
+
+    @_metadata.setter
+    def _metadata(self, val: list[dict]) -> None:
+        self._metadatas[self.DEFAULT_DATASOURCE] = val
+
+    @property
+    def _dirty(self) -> bool:
+        return any(self._dirty_flags.values())
+
+    @_dirty.setter
+    def _dirty(self, val: bool) -> None:
+        for ds in self.KNOWN_DATASOURCES:
+            self._dirty_flags[ds] = val
+
+    @property
     def count(self) -> int:
+        """Total vectors across all registered datasources."""
         with self._lock:
-            return self._index.ntotal if self._index is not None else 0
+            total = 0
+            for idx in self._indices.values():
+                if idx is not None:
+                    total += idx.ntotal
+            return total
+
+    def get_count(self, datasource: str = DEFAULT_DATASOURCE) -> int:
+        """Vector count for a specific datasource."""
+        with self._lock:
+            idx = self._indices.get(datasource)
+            return idx.ntotal if idx is not None else 0
 
     @property
     def faiss_gpu_enabled(self) -> bool:
-        """Whether the current index is running on GPU."""
+        """Whether the default index is running on GPU."""
         with self._lock:
             if self._index is None:
                 return False
@@ -229,7 +268,9 @@ class Indexer:
     # ------------------------------------------------------------------
     # Index creation
     # ------------------------------------------------------------------
-    def _create_index(self, dim: int | None = None) -> faiss.Index:
+    def _create_index(
+        self, dim: int | None = None, datasource: str = DEFAULT_DATASOURCE
+    ) -> faiss.Index:
         """Create a fresh index according to the configured type.
 
         When the index is empty (0 vectors) with faiss_index_type='ivf_flat'
@@ -242,7 +283,8 @@ class Indexer:
             dim = get_embedding_dim()
 
         idx_type = settings.faiss_index_type
-        n_existing = self._index.ntotal if self._index is not None else 0
+        existing_idx = self._indices.get(datasource)
+        n_existing = existing_idx.ntotal if existing_idx is not None else 0
 
         if idx_type == "hnsw":
             idx = faiss.IndexHNSWFlat(dim, settings.faiss_hnsw_m)
@@ -314,15 +356,16 @@ class Indexer:
     # Internal helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _count_path_for(type_key: str) -> Path:
+    def _count_path_for(type_key: str, datasource: str | None = None) -> Path:
         """Path to the freshness counter for a cached index type."""
-        return settings.index_dir / f"index.{type_key}.count"
+        return settings._count_path_for(type_key, datasource=datasource)
 
     # ------------------------------------------------------------------
     # Internal save (caller MUST hold self._lock)
     # ------------------------------------------------------------------
     def _save_unlocked(self) -> None:
-        """Persist index and metadata to disk atomically. Caller must hold _lock.
+        """Persist index and metadata to disk atomically for all dirty datasources.
+        Caller must hold _lock.
 
         Uses temp-file + atomic-rename to prevent corruption if the process is
         killed mid-write — the previous valid file survives until the new one
@@ -330,235 +373,284 @@ class Indexer:
         """
         import os as _os
 
-        if self._index is None or self._index.ntotal == 0:
-            return
+        for ds in self.KNOWN_DATASOURCES:
+            idx_obj = self._indices.get(ds)
+            if idx_obj is None or idx_obj.ntotal == 0 or not self._dirty_flags.get(ds, False):
+                continue
 
-        faiss_path = settings.faiss_path
-        meta_path = settings.metadata_path
-        count_path = self._count_path_for(settings.faiss_index_type)
-        n = self._index.ntotal
+            n = idx_obj.ntotal
+            faiss_path = settings._faiss_path_for(settings.faiss_index_type, datasource=ds)
+            meta_path = settings._metadata_path_for(settings.faiss_index_type, datasource=ds)
+            count_path = self._count_path_for(settings.faiss_index_type, datasource=ds)
+            faiss_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Safety check: never overwrite a valid index with fewer vectors.
-        # If the existing file has MORE vectors than we're about to save,
-        # something is wrong — refuse and keep the larger one.
-        if faiss_path.exists():
+            # Safety check: never overwrite a valid index with fewer vectors.
+            if faiss_path.exists():
+                try:
+                    existing = faiss.read_index(str(faiss_path))
+                    if existing.ntotal > n:
+                        logger.error(
+                            "REFUSING to shrink index for %s from %d → %d vectors. "
+                            "Delete %s manually if intentional.",
+                            ds,
+                            existing.ntotal,
+                            n,
+                            faiss_path,
+                        )
+                        continue
+                except Exception:
+                    pass  # existing file is corrupt — safe to overwrite
+
+            faiss_tmp = str(faiss_path) + ".tmp"
+            meta_tmp = str(meta_path) + ".tmp"
+            count_tmp = str(count_path) + ".tmp"
+
             try:
-                existing = faiss.read_index(str(faiss_path))
-                if existing.ntotal > n:
-                    logger.error(
-                        "REFUSING to shrink index from %d → %d vectors. "
-                        "Delete %s manually if intentional.",
-                        existing.ntotal,
-                        n,
-                        faiss_path,
-                    )
-                    return
-            except Exception:
-                pass  # existing file is corrupt — safe to overwrite
+                cpu_idx = self._maybe_to_cpu(idx_obj)
+                faiss.write_index(cpu_idx, faiss_tmp)
+                meta_tmp_path = Path(meta_tmp)
+                meta_tmp_path.write_text(
+                    json.dumps(self._metadatas[ds], ensure_ascii=False, indent=2)
+                )
+                count_tmp_path = Path(count_tmp)
+                count_tmp_path.write_text(str(n))
 
-        # Write to temp files first, then atomically rename.
-        # If we crash during write, the temp files are orphaned but the
-        # previous valid files survive.
-        faiss_tmp = str(faiss_path) + ".tmp"
-        meta_tmp = str(meta_path) + ".tmp"
-        count_tmp = str(count_path) + ".tmp"
+                # Atomic rename — this is the commit point
+                _os.replace(faiss_tmp, str(faiss_path))
+                _os.replace(meta_tmp, str(meta_path))
+                _os.replace(count_tmp, str(count_path))
 
-        try:
-            cpu_idx = self._maybe_to_cpu(self._index)
-            faiss.write_index(cpu_idx, faiss_tmp)
-            meta_tmp_path = Path(meta_tmp)
-            meta_tmp_path.write_text(json.dumps(self._metadata, ensure_ascii=False, indent=2))
-            count_tmp_path = Path(count_tmp)
-            count_tmp_path.write_text(str(n))
-
-            # Atomic rename — this is the commit point
-            _os.replace(faiss_tmp, str(faiss_path))
-            _os.replace(meta_tmp, str(meta_path))
-            _os.replace(count_tmp, str(count_path))
-
-            self._dirty = False
-            logger.info("Saved index (%d vectors) to %s", n, faiss_path)
-        finally:
-            # Clean up any leftover temp files
-            for tmp in (faiss_tmp, meta_tmp, count_tmp):
-                if _os.path.exists(tmp):
-                    _os.unlink(tmp)
+                self._dirty_flags[ds] = False
+                logger.info("Saved %s index (%d vectors) to %s", ds, n, faiss_path)
+            finally:
+                for tmp in (faiss_tmp, meta_tmp, count_tmp):
+                    if _os.path.exists(tmp):
+                        _os.unlink(tmp)
 
     # ------------------------------------------------------------------
     # Load / Save / Clear
     # ------------------------------------------------------------------
     def load(self) -> None:
-        """Restore index and metadata from disk, or create a fresh index.
+        """Restore index and metadata from disk, or create fresh indices for all known datasources.
 
-        Search order:
-          1. Configured type (e.g. data/index.ivf_flat.faiss)
-          2. Any other type that has saved files (pick the one with most vectors)
-          3. Legacy paths (data/index.faiss) for migration from old format
+        For each datasource:
+          1. Configured type in datasource directory (e.g. data/skin/index.flat.faiss)
+          2. Any other type that has saved files for that datasource
+          3. For default datasource ('skin'), fall back to root-level legacy files
+             (data/index.faiss)
           4. Fresh empty index
         """
         with self._lock:
-            # Build candidate list: configured type first, then all others sorted
-            # by vector count (largest first), then legacy.
-            candidates: list[tuple[Path, Path]] = []
+            for ds in self.KNOWN_DATASOURCES:
+                candidates: list[tuple[Path, Path]] = []
 
-            # 1. Configured type
-            candidates.append((settings.faiss_path, settings.metadata_path))
+                # 1. Configured type for this datasource
+                configured_faiss = settings._faiss_path_for(
+                    settings.faiss_index_type, datasource=ds
+                )
+                configured_meta = settings._metadata_path_for(
+                    settings.faiss_index_type, datasource=ds
+                )
+                candidates.append((configured_faiss, configured_meta))
 
-            # 2. Any other type with saved files, sorted by vector count desc
-            others = []
-            for t in ("flat", "ivf_flat", "ivf_pq", "hnsw"):
-                if t == settings.faiss_index_type:
-                    continue
-                fp = settings._faiss_path_for(t)
-                mp = settings._metadata_path_for(t)
-                cp = self._count_path_for(t)
-                if fp.exists() and mp.exists():
-                    n = 0
-                    if cp.exists():
-                        try:
-                            n = int(cp.read_text().strip())
-                        except Exception:
-                            pass
-                    others.append((n, fp, mp))
-            others.sort(key=lambda x: x[0], reverse=True)  # most vectors first
-            for _, fp, mp in others:
-                candidates.append((fp, mp))
+                # 2. Any other type with saved files for this datasource
+                others = []
+                for t in ("flat", "ivf_flat", "ivf_pq", "hnsw"):
+                    if t == settings.faiss_index_type:
+                        continue
+                    fp = settings._faiss_path_for(t, datasource=ds)
+                    mp = settings._metadata_path_for(t, datasource=ds)
+                    cp = self._count_path_for(t, datasource=ds)
+                    if fp.exists() and mp.exists():
+                        n = 0
+                        if cp.exists():
+                            try:
+                                n = int(cp.read_text().strip())
+                            except Exception:
+                                pass
+                        others.append((n, fp, mp))
+                others.sort(key=lambda x: x[0], reverse=True)
+                for _, fp, mp in others:
+                    candidates.append((fp, mp))
 
-            # 3. Legacy
-            candidates.append((settings.legacy_faiss_path, settings.legacy_metadata_path))
+                # 3. For default datasource ('skin'), check root-level legacy files
+                #    for backwards compatibility
+                if ds == self.DEFAULT_DATASOURCE:
+                    root_others = []
+                    for t in ("flat", "ivf_flat", "ivf_pq", "hnsw"):
+                        fp = settings._faiss_path_for(t, datasource=None)
+                        mp = settings._metadata_path_for(t, datasource=None)
+                        cp = self._count_path_for(t, datasource=None)
+                        if fp.exists() and mp.exists():
+                            n = 0
+                            if cp.exists():
+                                try:
+                                    n = int(cp.read_text().strip())
+                                except Exception:
+                                    pass
+                            root_others.append((n, fp, mp))
+                    root_others.sort(key=lambda x: x[0], reverse=True)
+                    for _, fp, mp in root_others:
+                        candidates.append((fp, mp))
+                    candidates.append((settings.legacy_faiss_path, settings.legacy_metadata_path))
 
-            # Diagnostic: log what we're looking for
-            logger.info(
-                "Searching for existing index (configured type: %s) ...", settings.faiss_index_type
-            )
-
-            # Try each candidate
-            for faiss_p, meta_p in candidates:
-                faiss_exists = faiss_p.exists()
-                meta_exists = meta_p.exists()
                 logger.info(
-                    "  Checking %s (faiss=%s size=%d, meta=%s)",
-                    faiss_p.name,
-                    faiss_exists,
-                    faiss_p.stat().st_size if faiss_exists else 0,
-                    meta_exists,
+                    "Searching for existing index for datasource '%s' (configured: %s) ...",
+                    ds,
+                    settings.faiss_index_type,
                 )
 
-                if faiss_exists and meta_exists:
-                    try:
-                        cpu_idx = faiss.read_index(str(faiss_p))
-                        self._metadata = json.loads(meta_p.read_text())
+                loaded = False
+                for faiss_p, meta_p in candidates:
+                    if faiss_p.exists() and meta_p.exists():
+                        try:
+                            cpu_idx = faiss.read_index(str(faiss_p))
+                            meta_list = json.loads(meta_p.read_text())
 
-                        # Check vector count matches metadata
-                        n_faiss = cpu_idx.ntotal
-                        n_meta = len(self._metadata)
-                        if n_faiss != n_meta:
+                            if hasattr(cpu_idx, "nprobe"):
+                                cpu_idx.nprobe = settings.faiss_nprobe
+                            if hasattr(cpu_idx, "hnsw"):
+                                cpu_idx.hnsw.efSearch = settings.faiss_hnsw_ef_search
+
+                            self._indices[ds] = self._maybe_to_gpu(cpu_idx)
+                            self._metadatas[ds] = meta_list
+                            logger.info(
+                                "  ✓ Loaded %s for datasource '%s' with %d vectors from %s",
+                                type(cpu_idx).__name__,
+                                ds,
+                                cpu_idx.ntotal,
+                                faiss_p,
+                            )
+                            # If loaded from legacy or root path, mark dirty so save() migrates it
+                            if faiss_p.parent == settings.index_dir:
+                                self._dirty_flags[ds] = True
+                            loaded = True
+                            break
+                        except Exception as e:
                             logger.warning(
-                                "  Vector count mismatch: faiss=%d, metadata=%d — using metadata",
-                                n_faiss,
-                                n_meta,
+                                "  ✗ Corrupt %s for datasource '%s': %s", faiss_p.name, ds, e
                             )
 
-                        # Restore runtime params not persisted by Faiss
-                        if hasattr(cpu_idx, "nprobe"):
-                            cpu_idx.nprobe = settings.faiss_nprobe
-                        if hasattr(cpu_idx, "hnsw"):
-                            cpu_idx.hnsw.efSearch = settings.faiss_hnsw_ef_search
-
-                        self._index = self._maybe_to_gpu(cpu_idx)
-                        logger.info(
-                            "  ✓ Loaded %s with %d vectors from %s",
-                            type(self._index).__name__,
-                            self._index.ntotal,
-                            faiss_p,
-                        )
-                        # Migrate legacy files to type-specific on next save
-                        if faiss_p == settings.legacy_faiss_path:
-                            self._dirty = True
-                        return
-                    except Exception as e:
-                        logger.warning("  ✗ Corrupt — %s: %s", faiss_p.name, e)
-
-            logger.warning(
-                "  No valid index found — starting fresh (checked %d candidates)",
-                len(candidates),
-            )
-            self._index = self._create_index()
-            self._metadata = []
+                if not loaded:
+                    logger.info("  No valid index found for datasource '%s' — starting fresh", ds)
+                    self._indices[ds] = self._create_index(datasource=ds)
+                    self._metadatas[ds] = []
+                    self._dirty_flags[ds] = False
 
     def save(self) -> None:
         """Persist index and metadata to disk (thread-safe, acquires lock)."""
         with self._lock:
-            if self._index is None or self._index.ntotal == 0:
-                logger.debug("Skipping save — empty index")
+            if not self._dirty:
+                logger.debug("Skipping save — no dirty datasources")
                 return
             self._save_unlocked()
 
-    def clear(self) -> None:
-        """Reset the index and metadata in memory and on disk."""
+    def clear(self, datasource: str | None = None) -> None:
+        """Reset the index and metadata in memory and on disk.
+
+        If datasource is None, resets all known datasources and cleans up legacy files.
+        If datasource is specified, resets only the given datasource.
+        """
         with self._lock:
-            self._index = None
-            self._index = self._create_index()
-            self._metadata = []
-            self._dirty = False
-            count_paths = [self._count_path_for(t) for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")]
-            for p in (
-                settings.all_type_faiss_paths()
-                + settings.all_type_metadata_paths()
-                + count_paths
-                + [settings.legacy_faiss_path, settings.legacy_metadata_path]
-            ):
-                if p.exists():
-                    p.unlink()
-        logger.info("Index cleared")
+            targets = [datasource] if datasource is not None else list(self.KNOWN_DATASOURCES)
+            for ds in targets:
+                self._indices[ds] = None
+                self._indices[ds] = self._create_index(datasource=ds)
+                self._metadatas[ds] = []
+                self._dirty_flags[ds] = False
+
+                count_paths = [
+                    self._count_path_for(t, datasource=ds)
+                    for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
+                ]
+                for p in (
+                    settings.all_type_faiss_paths(datasource=ds)
+                    + settings.all_type_metadata_paths(datasource=ds)
+                    + count_paths
+                ):
+                    if p.exists():
+                        p.unlink()
+
+            if datasource is None or datasource == self.DEFAULT_DATASOURCE:
+                legacy_count_paths = [
+                    self._count_path_for(t, datasource=None)
+                    for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
+                ]
+                for p in (
+                    settings.all_type_faiss_paths(datasource=None)
+                    + settings.all_type_metadata_paths(datasource=None)
+                    + legacy_count_paths
+                    + [settings.legacy_faiss_path, settings.legacy_metadata_path]
+                ):
+                    if p.exists():
+                        p.unlink()
+
+        logger.info("Index cleared (datasource=%s)", datasource or "all")
 
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
-    def add_item(self, vector: np.ndarray, meta: dict) -> int:
+    def add_item(self, vector: np.ndarray, meta: dict, datasource: str = DEFAULT_DATASOURCE) -> int:
         """Add a single vector with metadata. Returns the assigned ID."""
         with self._lock:
-            idx = self._index.ntotal if self._index is not None else 0
-            if self._index is not None:
-                self._index.add(vector.reshape(1, -1).astype(np.float32))
+            idx_obj = self._indices.get(datasource)
+            if idx_obj is None:
+                idx_obj = self._create_index(datasource=datasource)
+                self._indices[datasource] = idx_obj
+                self._metadatas[datasource] = []
+
+            idx = idx_obj.ntotal
+            idx_obj.add(vector.reshape(1, -1).astype(np.float32))
             meta["id"] = idx
-            self._metadata.append(meta)
-            logger.debug("Added item %d: %s", idx, meta.get("filename", "?"))
-            self._dirty = True
+            meta["datasource"] = datasource
+            self._metadatas[datasource].append(meta)
+            logger.debug("Added item %d (%s): %s", idx, datasource, meta.get("filename", "?"))
+            self._dirty_flags[datasource] = True
         return idx
 
-    def add_items(self, vectors: np.ndarray, metas: list[dict]) -> list[int]:
+    def add_items(
+        self,
+        vectors: np.ndarray,
+        metas: list[dict],
+        datasource: str = DEFAULT_DATASOURCE,
+    ) -> list[int]:
         """Batch add vectors. Returns list of assigned IDs.
 
         If auto_upgrade is enabled and the index has enough vectors for IVF
         training, automatically converts Flat→IVF after adding.
         """
         with self._lock:
-            if self._index is None:
-                return []
-            start_id = self._index.ntotal
-            self._index.add(vectors.astype(np.float32))
+            idx_obj = self._indices.get(datasource)
+            if idx_obj is None:
+                idx_obj = self._create_index(datasource=datasource)
+                self._indices[datasource] = idx_obj
+                self._metadatas[datasource] = []
+
+            start_id = idx_obj.ntotal
+            idx_obj.add(vectors.astype(np.float32))
             ids = []
             for i, meta in enumerate(metas):
                 assigned = start_id + i
                 meta["id"] = assigned
-                self._metadata.append(meta)
+                meta["datasource"] = datasource
+                self._metadatas[datasource].append(meta)
                 ids.append(assigned)
-            self._dirty = True
+            self._dirty_flags[datasource] = True
 
             # Auto-upgrade under RLock protection to prevent concurrency race
             if settings.faiss_auto_upgrade and settings.faiss_index_type in ("ivf_flat", "ivf_pq"):
-                n = self.count
+                n = idx_obj.ntotal
                 nlist = self._resolve_nlist(n)
                 if n >= nlist * 39:  # faiss recommends >= 39*nlist for training
-                    current_name = type(self._index).__name__
+                    current_name = type(idx_obj).__name__
                     target_pq = settings.faiss_index_type == "ivf_pq"
 
                     # Tier 1: Flat → IVF / IVFPQ
                     if "Flat" in current_name and "IVF" not in current_name:
                         logger.info(
-                            "Auto-triggering %s upgrade (%d vectors, nlist=%d)",
+                            "Auto-triggering %s upgrade for %s (%d vectors, nlist=%d)",
                             settings.faiss_index_type,
+                            datasource,
                             n,
                             nlist,
                         )
@@ -567,7 +659,8 @@ class Indexer:
                     # Tier 2: IVFFlat → IVFPQ
                     elif target_pq and "IVFFlat" in current_name:
                         logger.info(
-                            "Auto-triggering IVFFlat → IVFPQ upgrade (%d vectors, nlist=%d)",
+                            "Auto-triggering IVFFlat → IVFPQ upgrade for %s (%d vectors, nlist=%d)",
+                            datasource,
                             n,
                             nlist,
                         )
@@ -575,22 +668,34 @@ class Indexer:
 
         return ids
 
-    def get_metadata(self, idx: int) -> dict | None:
+    def get_metadata(self, idx: int, datasource: str = DEFAULT_DATASOURCE) -> dict | None:
         """Retrieve metadata for a given index ID."""
         with self._lock:
-            if 0 <= idx < len(self._metadata):
-                return self._metadata[idx]
+            meta_list = self._metadatas.get(datasource, [])
+            if 0 <= idx < len(meta_list):
+                return meta_list[idx]
             return None
 
-    def get_indexed_filenames(self) -> set[str]:
+    def get_indexed_filenames(self, datasource: str | None = None) -> set[str]:
         """Return the set of filenames currently in the index."""
         with self._lock:
-            return {m.get("filename", "") for m in self._metadata}
+            if datasource is not None:
+                return {m.get("filename", "") for m in self._metadatas.get(datasource, [])}
+            filenames: set[str] = set()
+            for meta_list in self._metadatas.values():
+                filenames.update(m.get("filename", "") for m in meta_list)
+            return filenames
 
-    def list_items(self, page: int = 1, page_size: int = 50) -> dict:
+    def list_items(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        datasource: str = DEFAULT_DATASOURCE,
+    ) -> dict:
         """Paginated listing of indexed items."""
         with self._lock:
-            total = len(self._metadata)
+            meta_list = self._metadatas.get(datasource, [])
+            total = len(meta_list)
             start = (page - 1) * page_size
             end = start + page_size
             items = [
@@ -599,34 +704,47 @@ class Indexer:
                     "filename": m.get("filename", "unknown"),
                     "dhash": m.get("dhash", ""),
                     "path": m.get("path", ""),
+                    "datasource": m.get("datasource", datasource),
                 }
-                for i, m in enumerate(self._metadata[start:end])
+                for i, m in enumerate(meta_list[start:end])
             ]
-            return {"items": items, "total": total, "page": page, "page_size": page_size}
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "datasource": datasource,
+            }
 
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
-    def search(self, query: np.ndarray, k: int | None = None) -> tuple[list[float], list[int]]:
+    def search(
+        self,
+        query: np.ndarray,
+        k: int | None = None,
+        datasource: str = DEFAULT_DATASOURCE,
+    ) -> tuple[list[float], list[int]]:
         """Search for k nearest neighbors. Returns (distances, ids)."""
         if k is None:
             k = settings.top_k
 
         with self._lock:
-            if self._index is None:
+            idx_obj = self._indices.get(datasource)
+            if idx_obj is None:
                 return [], []
-            total = self._index.ntotal
+            total = idx_obj.ntotal
             if total == 0:
                 return [], []
             k = min(k, total)
 
             # Restore runtime params that may drift (not persisted by Faiss)
-            if hasattr(self._index, "nprobe"):
-                self._index.nprobe = settings.faiss_nprobe
-            if hasattr(self._index, "hnsw"):
-                self._index.hnsw.efSearch = settings.faiss_hnsw_ef_search
+            if hasattr(idx_obj, "nprobe"):
+                idx_obj.nprobe = settings.faiss_nprobe
+            if hasattr(idx_obj, "hnsw"):
+                idx_obj.hnsw.efSearch = settings.faiss_hnsw_ef_search
 
-            distances, indices = self._index.search(query.reshape(1, -1).astype(np.float32), k)
+            distances, indices = idx_obj.search(query.reshape(1, -1).astype(np.float32), k)
             return distances[0].tolist(), indices[0].tolist()
 
     # ------------------------------------------------------------------
@@ -663,8 +781,7 @@ class Indexer:
                 return {
                     "status": "skipped",
                     "reason": (
-                        f"faiss_index_type={settings.faiss_index_type}, "
-                        "not ivf_flat or ivf_pq"
+                        f"faiss_index_type={settings.faiss_index_type}, not ivf_flat or ivf_pq"
                     ),
                 }
 
