@@ -1080,11 +1080,13 @@ class Indexer:
         if idx is None or idx.ntotal == 0:
             return
         cpu_idx = self._maybe_to_cpu(idx)
-        faiss.write_index(cpu_idx, str(settings._faiss_path_for(type_key, datasource=datasource)))
-        settings._metadata_path_for(type_key, datasource=datasource).write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2)
-        )
-        self._count_path_for(type_key, datasource=datasource).write_text(str(idx.ntotal))
+        fpath = settings._faiss_path_for(type_key, datasource=datasource)
+        mpath = settings._metadata_path_for(type_key, datasource=datasource)
+        cpath = self._count_path_for(type_key, datasource=datasource)
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(cpu_idx, str(fpath))
+        mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+        cpath.write_text(str(idx.ntotal))
         logger.debug(
             "Saved index as type=%s (%d vectors) for ds=%s", type_key, idx.ntotal, datasource
         )

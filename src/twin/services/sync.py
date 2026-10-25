@@ -184,9 +184,19 @@ def sync_images_dir() -> dict:
                 proc_imgs = []
                 ds_list = []
                 reports = []
-                for img in imgs:
+                valid_indices = []
+                for i, img in enumerate(imgs):
                     rep = inspect_texture(img)
+                    if rep.texture_type == TextureType.UNKNOWN:
+                        logger.warning(
+                            "Skipping unknown texture during sync: %s (%dx%d)",
+                            ok_paths[i].name,
+                            img.width,
+                            img.height,
+                        )
+                        continue
                     reports.append(rep)
+                    valid_indices.append(i)
                     ds = (
                         "cape"
                         if rep.texture_type in (TextureType.CAPE, TextureType.ELYTRA)
@@ -194,6 +204,10 @@ def sync_images_dir() -> dict:
                     )
                     ds_list.append(ds)
                     proc_imgs.append(single2double(img) if rep.can_auto_upgrade else img)
+
+                if not proc_imgs:
+                    _update_progress(indexed, skipped, failed)
+                    continue
 
                 # Step 2: Batch CLIP embedding (one forward pass for the whole batch)
                 vectors = compute_embeddings(proc_imgs)
@@ -205,12 +219,16 @@ def sync_images_dir() -> dict:
 
                 # Step 4: Group by datasource and batch-add to index
                 groups: dict[str, tuple[list[np.ndarray], list[dict]]] = {}
-                for i, (path, ah, dh, ph, ds, rep) in enumerate(
-                    zip(ok_paths, ahashes, dhashes, phashes, ds_list, reports)
-                ):
+                for sub_idx, orig_i in enumerate(valid_indices):
+                    path = ok_paths[orig_i]
+                    ah = ahashes[sub_idx]
+                    dh = dhashes[sub_idx]
+                    ph = phashes[sub_idx]
+                    ds = ds_list[sub_idx]
+                    rep = reports[sub_idx]
                     if ds not in groups:
                         groups[ds] = ([], [])
-                    groups[ds][0].append(vectors[i])
+                    groups[ds][0].append(vectors[sub_idx])
                     groups[ds][1].append(
                         {
                             "filename": path.name,
@@ -228,7 +246,7 @@ def sync_images_dir() -> dict:
                     indexer.add_items(np.stack(v_list), m_list, datasource=ds)
                     indexed += len(m_list)
 
-                for p_img, orig_img in zip(proc_imgs, imgs):
+                for p_img, orig_img in zip(proc_imgs, [imgs[i] for i in valid_indices]):
                     if p_img is not orig_img:
                         p_img.close()
 
@@ -251,8 +269,9 @@ def sync_images_dir() -> dict:
                 # Fallback: index one by one for this batch
                 for path, img in zip(ok_paths, imgs):
                     try:
-                        _index_single_from_disk(img, path)
-                        indexed += 1
+                        idx = _index_single_from_disk(img, path)
+                        if idx >= 0:
+                            indexed += 1
                     except Exception:
                         logger.warning("Failed to index: %s", path, exc_info=True)
                         failed += 1

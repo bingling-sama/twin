@@ -81,6 +81,8 @@ class Settings(BaseSettings):
         """Create required directories. Call once at startup."""
         for p in (self.index_dir, self.images_path):
             p.mkdir(parents=True, exist_ok=True)
+        for ds in ("skin", "cape"):
+            self._base_dir_for(ds).mkdir(parents=True, exist_ok=True)
 
     @property
     def index_dir(self) -> Path:
@@ -102,9 +104,7 @@ class Settings(BaseSettings):
         return self._metadata_path_for(self.faiss_index_type, datasource="skin")
 
     def _base_dir_for(self, datasource: str | None = None) -> Path:
-        base = self.index_dir / datasource if datasource else self.index_dir
-        base.mkdir(parents=True, exist_ok=True)
-        return base
+        return self.index_dir / datasource if datasource else self.index_dir
 
     def _faiss_path_for(self, index_type: str, datasource: str | None = "skin") -> Path:
         return self._base_dir_for(datasource) / f"index.{index_type}.faiss"

@@ -203,6 +203,21 @@ def search(
     t_cls_0 = time.perf_counter()
     report = inspect_texture(image)
     if datasource is None:
+        if report.texture_type == TextureType.UNKNOWN:
+            logger.warning(
+                "Search query rejected: unrecognized texture format (%dx%d)",
+                image.width,
+                image.height,
+            )
+            stages["classifier"] = {
+                "texture_type": report.texture_type.value,
+                "upgraded": False,
+                "datasource": "unknown",
+                "elapsed_ms": round((time.perf_counter() - t_cls_0) * 1000, 3),
+                "warning": f"Unrecognized Minecraft texture format ({image.width}x{image.height})",
+            }
+            return _empty(t0, stages, datasource="unknown")
+
         is_cape = report.texture_type in (TextureType.CAPE, TextureType.ELYTRA)
         target_ds = "cape" if is_cape else "skin"
     else:

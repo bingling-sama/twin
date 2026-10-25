@@ -225,3 +225,41 @@ def test_index_batch_all_images_corrupt():
         assert result["total"] == 2
         assert result["indexed"] == 0
         assert result["failed"] == 2
+
+
+def test_index_single_rejects_unknown():
+    """index_single must raise ValueError when texture is UNKNOWN."""
+    _ensure_model()
+    # Create an arbitrary non-standard dimension image (e.g. 50x50)
+    img = Image.new("RGBA", (50, 50), (128, 128, 128, 255))
+    with pytest.raises(ValueError, match="unrecognized Minecraft texture format"):
+        index_single(img, "invalid.png", b"fake_content")
+
+
+def test_index_single_from_disk_skips_unknown():
+    """_index_single_from_disk returns -1 for UNKNOWN textures."""
+    _ensure_model()
+    img = Image.new("RGBA", (50, 50), (128, 128, 128, 255))
+    fake_path = Path("fake_dir/invalid.png")
+    idx = _index_single_from_disk(img, fake_path)
+    assert idx == -1
+
+
+def test_index_batch_skips_unknown_textures():
+    """index_batch should skip unknown texture dimensions without failing the whole batch."""
+    _ensure_model()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        # 1 valid skin
+        shutil.copy(FIXTURES / "red.png", tmp / "red.png")
+        # 1 unknown dimension image
+        invalid_img = Image.new("RGBA", (100, 100), (200, 200, 200, 255))
+        invalid_img.save(tmp / "unknown.png")
+
+        result = index_batch(tmp)
+        assert result["status"] == "completed"
+        assert result["total"] == 2
+        assert result["indexed"] == 1
+        assert "red.png" in indexer.get_indexed_filenames()
+        assert "unknown.png" not in indexer.get_indexed_filenames()
+

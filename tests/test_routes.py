@@ -159,6 +159,22 @@ def test_validate_unsupported_extension(client):
     assert "Unsupported image format" in resp.json()["detail"]
 
 
+def test_index_unrecognized_texture_format(client):
+    """Upload a PNG with non-Minecraft dimensions (e.g. 50x50) returns 400."""
+    buf = BytesIO()
+    img = Image.new("RGBA", (50, 50), color="blue")
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    resp = client.post(
+        "/api/v1/index",
+        files={"file": ("invalid_size.png", buf.read(), "image/png")},
+    )
+    assert resp.status_code == 400
+    assert "unrecognized Minecraft texture format" in resp.json()["detail"]
+
+
+
 # ---------------------------------------------------------------------------
 # Text Search endpoint
 # ---------------------------------------------------------------------------

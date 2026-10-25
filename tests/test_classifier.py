@@ -5,6 +5,7 @@ from PIL import Image
 
 from twin.services.classifier import (
     TextureKind,
+    classify_texture,
     inspect_texture,
 )
 
@@ -134,3 +135,33 @@ def test_opaque_rgb_elytra():
     report = inspect_texture(img)
     assert report.kind == TextureKind.ELYTRA
     assert not report.can_auto_upgrade
+
+
+def test_classify_texture_convenience():
+    """classify_texture should directly return TextureKind."""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
+    assert classify_texture(img) == TextureKind.SKIN_DOUBLE
+
+
+def test_cape_boundary_pixels():
+    """Cape boundary pixels at (0, 0) and (21, 16) must trigger cape classification."""
+    # Test top-left corner (0, 0)
+    arr1 = np.zeros((32, 64, 4), dtype=np.uint8)
+    arr1[0, 0] = [255, 0, 0, 255]
+    img1 = Image.fromarray(arr1, mode="RGBA")
+    assert classify_texture(img1) == TextureKind.CAPE
+
+    # Test bottom-right edge of 22x17 cape rect: y=16, x=21
+    arr2 = np.zeros((32, 64, 4), dtype=np.uint8)
+    arr2[16, 21] = [0, 255, 0, 255]
+    img2 = Image.fromarray(arr2, mode="RGBA")
+    assert classify_texture(img2) == TextureKind.CAPE
+
+
+def test_opaque_cape_boundary_pixel():
+    """Opaque cape with foreground pixel at (0, 0) against black background."""
+    arr = np.zeros((32, 64, 3), dtype=np.uint8)
+    arr[0, 0] = [255, 200, 100]  # Foreground pixel at top-left
+    img = Image.fromarray(arr, mode="RGB")
+    assert classify_texture(img) == TextureKind.CAPE
+

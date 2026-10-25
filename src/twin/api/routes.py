@@ -148,7 +148,10 @@ def index_endpoint(file: UploadFile = File(...)):
     """Upload a single image to the index."""
     content = file.file.read()
     image = _validate_image(file.filename or "unknown", content)
-    result = index_single(image, file.filename or "unknown", content)
+    try:
+        result = index_single(image, file.filename or "unknown", content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return IndexStatus(**result)
 
 

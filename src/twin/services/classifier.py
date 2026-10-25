@@ -23,6 +23,15 @@ class TextureKind(str, Enum):
 
 TextureType = TextureKind
 
+__all__ = [
+    "TextureKind",
+    "TextureType",
+    "TextureReport",
+    "inspect_texture",
+    "classify_texture",
+]
+
+
 
 @dataclass(frozen=True)
 class TextureReport:
@@ -111,7 +120,7 @@ def _classify_2_to_1_texture(image: Image.Image, scale: int) -> TextureKind:
             arr, 23 * scale, 2 * scale, 45 * scale, 22 * scale
         )
         cape_body_has_pixels = _region_has_opaque_pixels(
-            arr, 1 * scale, 1 * scale, 21 * scale, 16 * scale
+            arr, 0, 0, 22 * scale, 17 * scale
         )
     else:
         # Fallback for opaque images (e.g. RGB JPG/PNG with solid background).
@@ -130,7 +139,7 @@ def _classify_2_to_1_texture(image: Image.Image, scale: int) -> TextureKind:
             arr, 23 * scale, 2 * scale, 45 * scale, 22 * scale, bg_color
         )
         cape_body_has_pixels = _region_has_foreground_opaque(
-            arr, 1 * scale, 1 * scale, 21 * scale, 16 * scale, bg_color
+            arr, 0, 0, 22 * scale, 17 * scale, bg_color
         )
 
     if skin_right_arm_has_pixels and skin_torso_has_pixels:
@@ -226,3 +235,12 @@ def inspect_texture(image: Image.Image) -> TextureReport:
         can_auto_upgrade=False,
         description=f"Non-standard texture dimensions ({width}x{height})",
     )
+
+
+def classify_texture(image: Image.Image) -> TextureKind:
+    """Classify texture kind directly from a PIL Image.
+
+    Convenience wrapper returning TextureKind directly.
+    """
+    return inspect_texture(image).kind
+

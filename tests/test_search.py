@@ -215,3 +215,15 @@ def test_search_explicit_params():
     result = search(img, top_k=10, dhash_threshold=5, phash_threshold=5, ssim_threshold=0.80)
     assert result["count"] == 1
     assert result["results"][0]["filename"] == "red.png"
+
+
+def test_search_unknown_texture_returns_empty():
+    """Searching with an unrecognized texture dimension returns empty and datasource='unknown'."""
+    _ensure_model()
+    img = Image.new("RGBA", (100, 50), (128, 128, 128, 255))
+    result = search(img)
+    assert result["count"] == 0
+    assert result["results"] == []
+    assert result["datasource"] == "unknown"
+    assert "warning" in result["stages"]["classifier"]
+
