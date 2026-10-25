@@ -65,15 +65,17 @@ class DiffMaskVerifier(BaseVerifier):
         self,
         tolerance: int | None = None,
         threshold: float | None = None,
-        alpha_threshold: int = 10,
+        alpha_threshold: int | None = None,
     ) -> None:
         self.tolerance = (
             tolerance if tolerance is not None else settings.diffmask_tolerance
         )
         self.threshold = (
-            threshold if threshold is not None else settings.diffmask_threshold
+            threshold if threshold is not None else settings.diffmask_diff_ratio_threshold
         )
-        self.alpha_threshold = alpha_threshold
+        self.alpha_threshold = (
+            alpha_threshold if alpha_threshold is not None else settings.diffmask_alpha_threshold
+        )
 
     def verify(self, query_img: Image.Image, cand_img: Image.Image) -> VerifyResult:
         # Pre-process texture upgrade if needed
@@ -85,17 +87,39 @@ class DiffMaskVerifier(BaseVerifier):
         if c_rep.can_auto_upgrade:
             cand_img = single2double(cand_img)
 
-        # Ensure RGBA and matching dimensions
+        # Ensure RGBA and matching dimensions (support HD textures like 128x128)
         q_rgba = query_img.convert("RGBA")
         c_rgba = cand_img.convert("RGBA")
-        if q_rgba.size != c_rgba.size:
-            # Dimension mismatch (e.g., cape vs skin without proper isolation)
-            return VerifyResult(
-                passed=False,
-                score=0.0,
-                diff_ratio=1.0,
-                details={"reason": "size_mismatch"},
-            )
+
+        q_w, q_h = q_rgba.size
+        c_w, c_h = c_rgba.size
+
+        if (q_w, q_h) != (c_w, c_h):
+            if q_w * c_h == q_h * c_w:
+                # Same aspect ratio (e.g. 64x64 vs 128x128 HD skin, or 64x32 vs 128x64 HD cape)
+                # Scale lower-res to higher using NEAREST to preserve pixel art edges
+                target_w = max(q_w, c_w)
+                target_h = max(q_h, c_h)
+                if (q_w, q_h) != (target_w, target_h):
+                    q_rgba = q_rgba.resize(
+                        (target_w, target_h), resample=Image.Resampling.NEAREST
+                    )
+                if (c_w, c_h) != (target_w, target_h):
+                    c_rgba = c_rgba.resize(
+                        (target_w, target_h), resample=Image.Resampling.NEAREST
+                    )
+            else:
+                # Incompatible aspect ratio (e.g., cape vs skin without proper isolation)
+                return VerifyResult(
+                    passed=False,
+                    score=0.0,
+                    diff_ratio=1.0,
+                    details={
+                        "reason": "aspect_ratio_mismatch",
+                        "q_size": (q_w, q_h),
+                        "c_size": (c_w, c_h),
+                    },
+                )
 
         arr1 = np.asarray(q_rgba, dtype=np.int16)
         arr2 = np.asarray(c_rgba, dtype=np.int16)

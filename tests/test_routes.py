@@ -182,6 +182,32 @@ def test_text_search_endpoint(client):
     assert data["results"][0]["filename"] in ("red.png", "blue.png")
 
 
+def test_text_search_with_datasource_endpoint(client):
+    """POST /search/text with datasource='cape' retrieves from cape index."""
+    import numpy as np
+
+    from twin.services.indexer import indexer
+
+    vec = np.zeros(512, dtype=np.float32)
+    meta = {
+        "filename": "custom_cape.png",
+        "path": "/tmp/custom_cape.png",
+        "dhash": "000",
+        "phash": "000",
+    }
+    indexer.add_item(vec, meta, datasource="cape")
+
+    resp = client.post(
+        "/api/v1/search/text",
+        json={"query": "a glowing red cape", "k": 1, "datasource": "cape"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 1
+    assert data["results"][0]["filename"] == "custom_cape.png"
+    assert data["results"][0]["datasource"] == "cape"
+
+
 # ---------------------------------------------------------------------------
 # Async Batch Indexing endpoint
 # ---------------------------------------------------------------------------

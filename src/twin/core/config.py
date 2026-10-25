@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     # --- Verification & Verifier ---
     verifier_type: str = "diffmask"  # "diffmask" | "ssim"
     diffmask_tolerance: int = 5  # per-channel RGB tolerance for DiffMask
-    diffmask_threshold: float = 0.05  # max differing pixel ratio for confirmed match (0.05 = 5%)
+    diffmask_alpha_threshold: int = 10  # alpha threshold for valid pixel mask
+    diffmask_diff_ratio_threshold: float = 0.05  # max differing pixel ratio for confirmed match
+    diffmask_threshold: float = 0.05  # alias for diffmask_diff_ratio_threshold
     binary_hamming_threshold: int = 10  # max Hamming distance for binary candidate recall
     ssim_threshold: float = 0.90  # min SSIM for structural duplicate
     ssim_size: int = 128  # resize dimension for SSIM comparison (128 = fast, 256 = precise)

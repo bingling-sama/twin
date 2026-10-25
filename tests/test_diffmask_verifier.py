@@ -120,3 +120,27 @@ def test_verifier_factory():
 
     v_ssim = get_verifier("ssim")
     assert isinstance(v_ssim, SSIMVerifier)
+
+
+def test_diffmask_hd_texture_nearest_scaling():
+    """64x64 skin vs 128x128 HD skin scales with NEAREST and matches perfectly."""
+    rng = np.random.RandomState(42)
+    raw = rng.randint(0, 256, (64, 64, 4), dtype=np.uint8)
+    raw[:, :, 3] = 255
+    skin64 = Image.fromarray(raw, mode="RGBA")
+
+    # 128x128 HD double-sampled skin via nearest neighbor
+    skin128 = skin64.resize((128, 128), resample=Image.Resampling.NEAREST)
+
+    v = DiffMaskVerifier()
+    res = v.verify(skin64, skin128)
+    assert res.passed is True
+    assert res.diff_ratio == 0.0
+    assert res.score == 1.0
+
+    # Incompatible aspect ratio test (1:1 skin vs 64x20 non-standard image)
+    weird_img = Image.new("RGBA", (64, 20), (255, 0, 0, 255))
+    res_weird = v.verify(skin64, weird_img)
+    assert res_weird.passed is False
+    assert res_weird.details.get("reason") == "aspect_ratio_mismatch"
+

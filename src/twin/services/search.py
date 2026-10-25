@@ -49,12 +49,16 @@ class SearchCandidate:
     meta: dict
     dhash_distance: int = 999
     phash_distance: int = 999
+    verifier_score: float = 0.0
+    verifier_type: str = "diffmask"
+    datasource: str = "skin"
     ssim_score: float = 0.0
     stages_passed: int = 0
     candidate_rotations: list[int] = field(default_factory=lambda: [0])
     best_rotation: int = 0
 
     def to_api_dict(self) -> dict:
+        v_score = self.verifier_score if self.verifier_score > 0.0 else self.ssim_score
         return {
             "id": self.id,
             "filename": self.filename,
@@ -63,7 +67,10 @@ class SearchCandidate:
             "stages_passed": self.stages_passed,
             "dhash_distance": self.dhash_distance,
             "phash_distance": self.phash_distance,
-            "ssim_score": self.ssim_score,
+            "verifier_score": v_score,
+            "verifier_type": self.verifier_type,
+            "datasource": self.datasource,
+            "ssim_score": v_score,
             "dhash_hex": self.meta.get("dhash", ""),
             "phash_hex": self.meta.get("phash", ""),
             "path": self.meta.get("path", ""),
@@ -117,10 +124,11 @@ def _assign_match_level(stages_passed: int) -> str:
     return "none"
 
 
-def _candidate_to_api_dict(c: SearchCandidate | dict) -> dict:
+def _candidate_to_api_dict(c: SearchCandidate | dict, datasource: str = "skin") -> dict:
     if isinstance(c, SearchCandidate):
         return c.to_api_dict()
     meta = c.get("meta", {}) if isinstance(c.get("meta"), dict) else {}
+    v_score = c.get("verifier_score", c.get("ssim_score", 0.0))
     return {
         "id": c["id"],
         "filename": c["filename"],
@@ -129,7 +137,10 @@ def _candidate_to_api_dict(c: SearchCandidate | dict) -> dict:
         "stages_passed": c.get("stages_passed", 0),
         "dhash_distance": c.get("dhash_distance", 999),
         "phash_distance": c.get("phash_distance", 999),
-        "ssim_score": c.get("ssim_score", 0.0),
+        "verifier_score": v_score,
+        "verifier_type": c.get("verifier_type", "diffmask"),
+        "datasource": c.get("datasource", datasource),
+        "ssim_score": v_score,
         "dhash_hex": meta.get("dhash", ""),
         "phash_hex": meta.get("phash", ""),
         "path": meta.get("path", ""),
@@ -137,12 +148,17 @@ def _candidate_to_api_dict(c: SearchCandidate | dict) -> dict:
 
 
 def _final_sort(results: list[SearchCandidate | dict]) -> None:
-    """In-place sort: verified first (stages_passed DESC), then pHash ASC, then dHash ASC."""
+    """In-place sort: verified first (stages_passed DESC), then verifier_score DESC,
+    then pHash ASC, then dHash ASC, then distance ASC.
+    """
     def _key(r):
         if isinstance(r, SearchCandidate):
-            return (-r.stages_passed, r.phash_distance, r.dhash_distance, r.distance)
+            v_score = r.verifier_score if r.verifier_score > 0.0 else r.ssim_score
+            return (-r.stages_passed, -v_score, r.phash_distance, r.dhash_distance, r.distance)
+        v_score = r.get("verifier_score", r.get("ssim_score", 0.0))
         return (
             -r.get("stages_passed", 0),
+            -v_score,
             r.get("phash_distance", 999),
             r.get("dhash_distance", 999),
             r.get("distance", 0.0),
@@ -303,6 +319,8 @@ def search(
         else:
             stages_passed = 1
 
+        v_score = round(float(v_res.score), 4)
+        v_type_name = type(active_verifier).__name__.lower().replace("verifier", "")
         cand = SearchCandidate(
             id=idx,
             filename=meta.get("filename", "unknown"),
@@ -310,7 +328,10 @@ def search(
             meta=meta,
             dhash_distance=cand_d_dist,
             phash_distance=p_dist,
-            ssim_score=round(float(v_res.score), 4),
+            verifier_score=v_score,
+            verifier_type=v_type_name,
+            datasource=target_ds,
+            ssim_score=v_score,
             stages_passed=stages_passed,
             candidate_rotations=[best_rot],
             best_rotation=best_rot,
@@ -401,6 +422,7 @@ def search_by_text(
                 "path": meta.get("path", ""),
                 "dhash_hex": meta.get("dhash", ""),
                 "phash_hex": meta.get("phash", ""),
+                "datasource": datasource,
             }
         )
 

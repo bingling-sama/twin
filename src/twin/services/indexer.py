@@ -82,40 +82,50 @@ class Indexer:
         }
 
     # ------------------------------------------------------------------
-    # Properties & Datasource Accessors
+    # Properties & Datasource Accessors (Thread-safe via _lock)
     # ------------------------------------------------------------------
     @property
     def _index(self) -> faiss.Index | None:
-        return self._indices.get(self.DEFAULT_DATASOURCE)
+        with self._lock:
+            return self._indices.get(self.DEFAULT_DATASOURCE)
 
     @_index.setter
     def _index(self, val: faiss.Index | None) -> None:
-        self._indices[self.DEFAULT_DATASOURCE] = val
+        with self._lock:
+            self._indices[self.DEFAULT_DATASOURCE] = val
 
     @property
     def _binary_index(self) -> faiss.IndexBinaryFlat | None:
-        return self._binary_indices.get(self.DEFAULT_DATASOURCE)
+        with self._lock:
+            return self._binary_indices.get(self.DEFAULT_DATASOURCE)
 
     @_binary_index.setter
     def _binary_index(self, val: faiss.IndexBinaryFlat | None) -> None:
-        self._binary_indices[self.DEFAULT_DATASOURCE] = val
+        with self._lock:
+            self._binary_indices[self.DEFAULT_DATASOURCE] = val
 
     @property
     def _metadata(self) -> list[dict]:
-        return self._metadatas.get(self.DEFAULT_DATASOURCE, [])
+        with self._lock:
+            if self.DEFAULT_DATASOURCE not in self._metadatas:
+                self._metadatas[self.DEFAULT_DATASOURCE] = []
+            return self._metadatas[self.DEFAULT_DATASOURCE]
 
     @_metadata.setter
     def _metadata(self, val: list[dict]) -> None:
-        self._metadatas[self.DEFAULT_DATASOURCE] = val
+        with self._lock:
+            self._metadatas[self.DEFAULT_DATASOURCE] = val
 
     @property
     def _dirty(self) -> bool:
-        return any(self._dirty_flags.values())
+        with self._lock:
+            return any(self._dirty_flags.values())
 
     @_dirty.setter
     def _dirty(self, val: bool) -> None:
-        for ds in self.KNOWN_DATASOURCES:
-            self._dirty_flags[ds] = val
+        with self._lock:
+            for ds in self.KNOWN_DATASOURCES:
+                self._dirty_flags[ds] = val
 
     @property
     def count(self) -> int:
@@ -221,71 +231,75 @@ class Indexer:
     # GPU toggle
     # ------------------------------------------------------------------
     def set_gpu_enabled(self, enabled: bool) -> dict:
-        """Enable or disable GPU acceleration for the current Faiss index.
+        """Enable or disable GPU acceleration across all Faiss indices.
 
-        When enabling: wraps the CPU index in a GpuIndex (requires faiss-gpu
-        and CUDA).  When disabling: unwraps back to CPU.
-
-        HNSW indices are CPU-only — enabling GPU is a no-op for them.
-        Flat/IVF indices benefit most from GPU acceleration.
-
-        Also updates settings.faiss_gpu so future rebuilds honour the choice.
+        Applies to all datasources (skin and cape) holding vectors.
+        HNSW indices are CPU-only — GPU is skipped for them.
         """
         with self._lock:
-            if self._index is None or self._index.ntotal == 0:
+            total_vectors = sum(
+                idx.ntotal for idx in self._indices.values() if idx is not None
+            )
+            if total_vectors == 0:
                 return {"status": "skipped", "reason": "index is empty"}
 
-            current_name = type(self._index).__name__
-            currently_gpu = "GpuIndex" in current_name
-            is_hnsw = "HNSW" in current_name
-
-            if is_hnsw:
+            if enabled and self._gpu_res is None:
+                self._init_gpu()
+            if enabled and self._gpu_res is None:
                 return {
-                    "status": "skipped",
-                    "reason": "HNSW is CPU-only (GPU not supported by Faiss)",
+                    "status": "unavailable",
+                    "reason": (
+                        "No GPU resources available (faiss-gpu not installed "
+                        "or CUDA unavailable)"
+                    ),
                 }
 
-            if enabled and not currently_gpu:
-                # Try to init GPU resources
-                if self._gpu_res is None:
-                    self._init_gpu()
-                if self._gpu_res is not None:
+            results: dict[str, dict] = {}
+            for ds in self.KNOWN_DATASOURCES:
+                idx_obj = self._indices.get(ds)
+                if idx_obj is None or idx_obj.ntotal == 0:
+                    continue
+                current_name = type(idx_obj).__name__
+                currently_gpu = "GpuIndex" in current_name
+                is_hnsw = "HNSW" in current_name
+
+                if is_hnsw:
+                    results[ds] = {
+                        "status": "skipped",
+                        "reason": "HNSW is CPU-only (GPU not supported by Faiss)",
+                    }
+                    continue
+
+                if enabled and not currently_gpu:
                     try:
-                        self._index = faiss.index_cpu_to_gpu(
-                            self._gpu_res, self._gpu_id, self._index
+                        self._indices[ds] = faiss.index_cpu_to_gpu(
+                            self._gpu_res, self._gpu_id, idx_obj
                         )
-                        settings.faiss_gpu = True
-                        logger.info("GPU Faiss enabled — index now on GPU")
-                        return {
+                        results[ds] = {
                             "status": "enabled",
-                            "index_type": type(self._index).__name__,
+                            "index_type": type(self._indices[ds]).__name__,
                         }
                     except Exception as e:
-                        return {"status": "error", "reason": str(e)}
+                        results[ds] = {"status": "error", "reason": str(e)}
+                elif not enabled and currently_gpu:
+                    try:
+                        self._indices[ds] = faiss.index_gpu_to_cpu(idx_obj)
+                        results[ds] = {
+                            "status": "disabled",
+                            "index_type": type(self._indices[ds]).__name__,
+                        }
+                    except Exception as e:
+                        results[ds] = {"status": "error", "reason": str(e)}
                 else:
-                    return {
-                        "status": "unavailable",
-                        "reason": (
-                            "No GPU resources available (faiss-gpu not installed "
-                            "or CUDA unavailable)"
-                        ),
-                    }
+                    state = "GPU" if currently_gpu else "CPU"
+                    results[ds] = {"status": "unchanged", "reason": f"already on {state}"}
 
-            elif not enabled and currently_gpu:
-                try:
-                    self._index = faiss.index_gpu_to_cpu(self._index)
-                    settings.faiss_gpu = False
-                    logger.info("GPU Faiss disabled — index moved to CPU")
-                    return {
-                        "status": "disabled",
-                        "index_type": type(self._index).__name__,
-                    }
-                except Exception as e:
-                    return {"status": "error", "reason": str(e)}
-
-            else:
-                state = "GPU" if currently_gpu else "CPU"
-                return {"status": "unchanged", "reason": f"already on {state}"}
+            settings.faiss_gpu = enabled
+            return {
+                "status": "enabled" if enabled else "disabled",
+                "datasources": results,
+                "index_type": type(self._index).__name__ if self._index is not None else "none",
+            }
 
     # ------------------------------------------------------------------
     # Index creation
@@ -754,7 +768,7 @@ class Indexer:
                             n,
                             nlist,
                         )
-                        self.train_index()
+                        self.train_index(datasource=datasource)
 
                     # Tier 2: IVFFlat → IVFPQ
                     elif target_pq and "IVFFlat" in current_name:
@@ -764,7 +778,7 @@ class Indexer:
                             n,
                             nlist,
                         )
-                        self.train_index()
+                        self.train_index(datasource=datasource)
 
         return ids
 
@@ -872,8 +886,8 @@ class Indexer:
     # ------------------------------------------------------------------
     # IVF training
     # ------------------------------------------------------------------
-    def train_index(self) -> dict:
-        """Train / upgrade the current index toward the configured target type.
+    def train_index(self, datasource: str = DEFAULT_DATASOURCE) -> dict:
+        """Train / upgrade the index for the given datasource toward the configured target type.
 
         Upgrade paths (all require faiss_auto_upgrade=True for automatic
         triggering; manual POST /index/train always works):
@@ -885,15 +899,24 @@ class Indexer:
         Returns a status dict suitable for the /api/v1/index/train response.
         """
         with self._lock:
-            if self._index is None or self._index.ntotal == 0:
-                return {"status": "skipped", "reason": "index is empty"}
+            idx_obj = self._indices.get(datasource)
+            if idx_obj is None or idx_obj.ntotal == 0:
+                return {
+                    "status": "skipped",
+                    "reason": f"index for '{datasource}' is empty",
+                    "datasource": datasource,
+                }
 
-            n = self._index.ntotal
-            current_name = type(self._index).__name__
+            n = idx_obj.ntotal
+            current_name = type(idx_obj).__name__
 
             # HNSW — no training
             if "HNSW" in current_name:
-                return {"status": "skipped", "reason": "HNSW index does not require training"}
+                return {
+                    "status": "skipped",
+                    "reason": "HNSW index does not require training",
+                    "datasource": datasource,
+                }
 
             # Check if we're already at the configured target
             target_pq = settings.faiss_index_type == "ivf_pq"
@@ -905,13 +928,22 @@ class Indexer:
                     "reason": (
                         f"faiss_index_type={settings.faiss_index_type}, not ivf_flat or ivf_pq"
                     ),
+                    "datasource": datasource,
                 }
 
             # Already at target?
             if not target_pq and "IVFFlat" in current_name:
-                return {"status": "skipped", "reason": "already an IndexIVFFlat"}
+                return {
+                    "status": "skipped",
+                    "reason": "already an IndexIVFFlat",
+                    "datasource": datasource,
+                }
             if target_pq and "IVFPQ" in current_name:
-                return {"status": "skipped", "reason": "already an IndexIVFPQ"}
+                return {
+                    "status": "skipped",
+                    "reason": "already an IndexIVFPQ",
+                    "datasource": datasource,
+                }
 
             # Determine the transition
             from_ivf_flat = "IVFFlat" in current_name
@@ -924,20 +956,27 @@ class Indexer:
                     "nlist": nlist,
                     "n_vectors": n,
                     "min_required": nlist * 39,
+                    "datasource": datasource,
                 }
 
             if from_ivf_flat:
-                logger.info("Upgrading IVFFlat → IVFPQ (nlist=%d, n_vectors=%d) ...", nlist, n)
+                logger.info(
+                    "Upgrading IVFFlat → IVFPQ for %s (nlist=%d, n_vectors=%d) ...",
+                    datasource,
+                    nlist,
+                    n,
+                )
             else:
                 logger.info(
-                    "Training %s index (nlist=%d, n_vectors=%d) ...",
+                    "Training %s index for %s (nlist=%d, n_vectors=%d) ...",
                     settings.faiss_index_type,
+                    datasource,
                     nlist,
                     n,
                 )
 
             # Extract all vectors from current index
-            cpu_idx = self._maybe_to_cpu(self._index)
+            cpu_idx = self._maybe_to_cpu(idx_obj)
             vectors = cpu_idx.reconstruct_n(0, n)
 
             # Build and train new index
@@ -954,10 +993,10 @@ class Indexer:
                 new_idx.add(vectors)
                 idx_label = "IndexIVFPQ"
                 logger.info(
-                    "IVFPQ training complete (nlist=%d, m=%d, nbits=%d, nprobe=%d, %d vectors)",
+                    "IVFPQ training complete for %s (nlist=%d, m=%d, nprobe=%d, %d vectors)",
+                    datasource,
                     nlist,
                     m,
-                    settings.faiss_pq_nbits,
                     settings.faiss_nprobe,
                     n,
                 )
@@ -968,15 +1007,16 @@ class Indexer:
                 new_idx.add(vectors)
                 idx_label = "IndexIVFFlat"
                 logger.info(
-                    "IVF training complete (nlist=%d, nprobe=%d, %d vectors)",
+                    "IVF training complete for %s (nlist=%d, nprobe=%d, %d vectors)",
+                    datasource,
                     nlist,
                     settings.faiss_nprobe,
                     n,
                 )
 
-            # Swap
-            self._index = self._maybe_to_gpu(new_idx)
-            self._dirty = True
+            # Swap specific datasource
+            self._indices[datasource] = self._maybe_to_gpu(new_idx)
+            self._dirty_flags[datasource] = True
 
             status = "upgraded" if from_ivf_flat else "trained"
             return {
@@ -985,6 +1025,7 @@ class Indexer:
                 "nlist": nlist,
                 "nprobe": settings.faiss_nprobe,
                 "n_vectors": n,
+                "datasource": datasource,
             }
 
     def upgrade_to_ivf(self) -> dict:

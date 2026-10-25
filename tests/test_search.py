@@ -220,6 +220,9 @@ def test_build_response():
         meta={"dhash": "111", "phash": "222", "path": "/tmp/cand.png"},
         dhash_distance=2,
         phash_distance=4,
+        verifier_score=0.98,
+        verifier_type="diffmask",
+        datasource="skin",
         ssim_score=0.98,
         stages_passed=3,
     )
@@ -228,9 +231,34 @@ def test_build_response():
     cand_item = resp_cand["results"][0]
     assert cand_item["id"] == 1
     assert cand_item["match_level"] == "confirmed"
+    assert cand_item["verifier_score"] == 0.98
+    assert cand_item["verifier_type"] == "diffmask"
+    assert cand_item["datasource"] == "skin"
     assert cand_item["dhash_hex"] == "111"
     assert cand_item["phash_hex"] == "222"
     assert cand_item["path"] == "/tmp/cand.png"
+
+
+def test_final_sort_verifier_score_priority():
+    """Candidates in the same stage (confirmed) are sorted by verifier_score DESC."""
+    cands = [
+        SearchCandidate(
+            id=1, filename="1.png", distance=0.1, meta={},
+            stages_passed=3, verifier_score=0.92, phash_distance=2
+        ),
+        SearchCandidate(
+            id=2, filename="2.png", distance=0.2, meta={},
+            stages_passed=3, verifier_score=1.00, phash_distance=4
+        ),
+        SearchCandidate(
+            id=3, filename="3.png", distance=0.0, meta={},
+            stages_passed=3, verifier_score=0.95, phash_distance=0
+        ),
+    ]
+    _final_sort(cands)
+    ids = [c.id for c in cands]
+    # id=2 (score 1.0) must come first, followed by id=3 (0.95), then id=1 (0.92)
+    assert ids == [2, 3, 1]
 
 
 # ---------------------------------------------------------------------------

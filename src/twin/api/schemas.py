@@ -7,12 +7,15 @@ from pydantic import BaseModel, Field
 class SearchResultItem(BaseModel):
     id: int
     filename: str
-    distance: float  # L2 distance in CLIP embedding space
+    distance: float = 0.0  # Recall distance (Hamming or L2)
     match_level: str  # "confirmed" | "suspected" | "none"
-    stages_passed: int  # how many filter stages passed (0–4)
+    stages_passed: int  # how many filter stages passed (0–3)
     dhash_distance: int = 999  # Hamming distance of dHash
     phash_distance: int = 999  # Hamming distance of pHash
-    ssim_score: float = 0.0  # Structural similarity (1.0 = identical)
+    verifier_score: float = 0.0  # Verified similarity score [0.0, 1.0]
+    verifier_type: str = "diffmask"  # Active verifier algorithm ("diffmask" | "ssim")
+    datasource: str = "skin"  # Target datasource ("skin" | "cape")
+    ssim_score: float = 0.0  # Backward-compatible alias for verifier_score
     dhash_hex: str = ""  # raw dHash hex string
     phash_hex: str = ""  # raw pHash hex string
     path: str = ""  # file path on server (empty for upload-only images)
@@ -21,6 +24,7 @@ class SearchResultItem(BaseModel):
 class SearchResponse(BaseModel):
     results: list[SearchResultItem]
     count: int
+    datasource: str = "skin"
     query_time_ms: float
     stages: dict = Field(default_factory=dict)
 
@@ -31,12 +35,16 @@ class TextSearchRequest(BaseModel):
     k: int | None = Field(
         default=None, description="Number of candidates to retrieve", ge=1, le=1000
     )
+    datasource: str = Field(
+        default="skin", description="Target datasource ('skin' or 'cape')"
+    )
 
 
 class TextSearchResultItem(BaseModel):
     id: int
     filename: str
     distance: float
+    datasource: str = "skin"
     path: str = ""
     dhash_hex: str = ""
     phash_hex: str = ""
@@ -73,6 +81,7 @@ class IndexStatus(BaseModel):
     status: str  # "indexed" | "already_exists"
     id: int
     filename: str
+    datasource: str = "skin"
 
 
 class BatchIndexRequest(BaseModel):
