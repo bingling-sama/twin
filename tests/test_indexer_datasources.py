@@ -115,3 +115,41 @@ def test_datasource_selective_clear(monkeypatch):
         assert idx.get_count("skin") == 0
         assert idx.get_count("cape") == 0
         assert not s._faiss_path_for("flat", datasource="skin").exists()
+
+
+def test_datasource_rebuild(monkeypatch):
+    """Rebuilding index must operate on separate datasource directories, not root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        s = Settings(index_path=tmpdir, faiss_index_type="flat")
+        monkeypatch.setattr("twin.services.indexer.settings", s)
+
+        idx = Indexer()
+        idx.load()
+
+        idx.add_item(_make_vector(1), {"filename": "skin.png"}, datasource="skin")
+        idx.add_item(_make_vector(2), {"filename": "cape.png"}, datasource="cape")
+
+        # Global rebuild across all datasources
+        res = idx.rebuild()
+        assert res["total_vectors"] == 2
+        assert "skin" in res["datasources"]
+        assert "cape" in res["datasources"]
+
+        # Check separate directories exist
+        skin_faiss = s._faiss_path_for("flat", datasource="skin")
+        cape_faiss = s._faiss_path_for("flat", datasource="cape")
+        assert skin_faiss.exists()
+        assert cape_faiss.exists()
+
+        # Check count files
+        assert s._count_path_for("flat", datasource="skin").exists()
+        assert s._count_path_for("flat", datasource="cape").exists()
+
+        # Root directory must NOT contain a flat index
+        root_faiss = s.index_dir / "index.flat.faiss"
+        assert not root_faiss.exists()
+
+        # Single datasource rebuild
+        res_cape = idx.rebuild(datasource="cape")
+        assert res_cape["datasource"] == "cape"
+        assert res_cape["n_vectors"] == 1

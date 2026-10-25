@@ -14,7 +14,6 @@ Architecture (Issue #5):
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from PIL import Image
 
@@ -25,13 +24,11 @@ from twin.services.hasher import (
     compute_dhash,
     compute_phash,
     compute_rotated_phashes,
-    compute_ssim,
     hamming_distance,
     rotate_image,
 )
 from twin.services.indexer import indexer
 from twin.services.verifiers import get_verifier
-from twin.utils.image import load_image
 
 logger = logging.getLogger(__name__)
 
@@ -77,30 +74,6 @@ class SearchCandidate:
         }
 
 
-# ---------------------------------------------------------------------------
-# Pipeline helpers (backward compatible)
-# ---------------------------------------------------------------------------
-def _passes_hash(query_hash: str, candidate_hash: str, threshold: int) -> tuple[bool, int]:
-    """Check a perceptual hash against threshold. Returns (passed, distance)."""
-    if not query_hash or not candidate_hash:
-        return False, 999
-    dist = hamming_distance(query_hash, candidate_hash)
-    return dist <= threshold, dist
-
-
-def _passes_ssim(query_img: Image.Image, cand_path: str, threshold: float) -> tuple[bool, float]:
-    if not cand_path or not Path(cand_path).exists():
-        return False, 0.0
-    cand_img = load_image(cand_path)
-    if cand_img is None:
-        return False, 0.0
-    cand_rep = inspect_texture(cand_img)
-    if cand_rep.can_auto_upgrade:
-        cand_img = single2double(cand_img)
-    score = compute_ssim(query_img, cand_img)
-    return score >= threshold, score
-
-
 def _empty(t0: float, stages: dict, datasource: str = "skin") -> dict:
     """Return an empty-but-well-formed search response dict."""
     elapsed = time.perf_counter() - t0
@@ -116,10 +89,15 @@ def _empty(t0: float, stages: dict, datasource: str = "skin") -> dict:
 
 
 def _assign_match_level(stages_passed: int) -> str:
-    """Tier based on verification result."""
+    """Tier based on verification result.
+
+    - >= 3: confirmed (passed Verifier, e.g. diffmask <= threshold)
+    - == 2: suspected (within perceptual hash threshold)
+    - <= 1: none (recalled or unverified)
+    """
     if stages_passed >= 3:
         return "confirmed"
-    elif stages_passed >= 1:
+    elif stages_passed == 2:
         return "suspected"
     return "none"
 

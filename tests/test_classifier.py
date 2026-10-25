@@ -92,3 +92,45 @@ def test_unknown_dimensions():
     assert report.width == 100
     assert report.height == 50
     assert not report.can_auto_upgrade
+
+
+def test_opaque_rgb_cape():
+    """64x32 opaque RGB cape with solid black background must not be misclassified as skin."""
+    arr = np.zeros((32, 64, 3), dtype=np.uint8)
+    arr[2:15, 2:20] = [0, 100, 255]  # Cape body
+    img = Image.fromarray(arr, mode="RGB")
+    report = inspect_texture(img)
+    assert report.kind == TextureKind.CAPE
+    assert not report.can_auto_upgrade
+
+
+def test_opaque_white_bg_cape():
+    """64x32 opaque RGB cape with solid white background."""
+    arr = np.full((32, 64, 3), 255, dtype=np.uint8)
+    arr[2:15, 2:20] = [10, 80, 240]  # Cape body
+    img = Image.fromarray(arr, mode="RGB")
+    report = inspect_texture(img)
+    assert report.kind == TextureKind.CAPE
+    assert not report.can_auto_upgrade
+
+
+def test_opaque_rgb_legacy_skin():
+    """64x32 opaque RGB legacy skin with solid black background and arm/torso pixels."""
+    arr = np.zeros((32, 64, 3), dtype=np.uint8)
+    arr[2:15, 2:20] = [200, 150, 100]  # Head
+    arr[20:30, 22:30] = [0, 255, 0]    # Torso
+    arr[20:30, 48:54] = [255, 0, 0]    # Arm
+    img = Image.fromarray(arr, mode="RGB")
+    report = inspect_texture(img)
+    assert report.kind == TextureKind.SKIN_SINGLE
+    assert report.can_auto_upgrade
+
+
+def test_opaque_rgb_elytra():
+    """64x32 opaque RGB elytra with solid black background."""
+    arr = np.zeros((32, 64, 3), dtype=np.uint8)
+    arr[5:15, 25:35] = [255, 255, 0]  # Elytra
+    img = Image.fromarray(arr, mode="RGB")
+    report = inspect_texture(img)
+    assert report.kind == TextureKind.ELYTRA
+    assert not report.can_auto_upgrade

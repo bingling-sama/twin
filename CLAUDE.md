@@ -253,12 +253,15 @@ main.py (lifespan)
 
 routes.py (HTTP handlers)
   ├── [Search]  → services/search.py::search()
-  │     ├── embedding.py::compute_embedding()
-  │     │     └── clip_model.py::encode_image()
-  │     ├── hasher.py::compute_dhash() / compute_phash()
-  │     ├── indexer.py::search()
-  │     ├── utils/image.py::load_image()   (for SSIM candidates)
-  │     └── hasher.py::compute_ssim()
+  │     ├── classifier.py::inspect_texture()
+  │     ├── converter.py::single2double()  (if 64x32 legacy skin)
+  │     ├── hasher.py::compute_phash()
+  │     ├── indexer.py::search_binary()    (faiss.IndexBinaryFlat SIMD, 0% GPU)
+  │     └── verifiers.py::get_verifier()   (DiffMaskVerifier / SSIMVerifier)
+  ├── [TextSearch] → services/search.py::search_by_text()
+  │     ├── embedding.py::compute_text_embedding()
+  │     │     └── clip_model.py::encode_text()
+  │     └── indexer.py::search()           (faiss.IndexFlatL2 vector search)
   ├── [Index]   → services/index_service.py::index_single()
   │     ├── indexer.py::get_indexed_filenames()
   │     ├── embedding.py::compute_embedding()
@@ -348,10 +351,9 @@ POST /api/v1/search (Image query)
 
 POST /api/v1/search/text (Text query)
   → routes.py: search_text_endpoint()
-  → services/search.py: search_by_text(query)
+  → services/search.py: search_by_text(query, datasource)
       ├─ Step 1: CLIP encode_text(query) → 512-dim vector
-      ├─ Step 2: IndexFlatL2 search on skin datasource → Top-K semantic candidates
-      └─ Step 3: Top-K Verifier validation
+      └─ Step 2: IndexFlatL2 search on target datasource → Top-K semantic candidates
   → TextSearchResponse JSON
 ```
 

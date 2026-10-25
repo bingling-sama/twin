@@ -1,6 +1,5 @@
 """Tests for search pipeline — helpers, edge cases, and full flow."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,8 +13,6 @@ from twin.services.search import (
     _build_response,
     _empty,
     _final_sort,
-    _passes_hash,
-    _passes_ssim,
     search,
 )
 
@@ -36,85 +33,6 @@ def _clear_index():
 
 
 # ---------------------------------------------------------------------------
-# _passes_hash
-# ---------------------------------------------------------------------------
-def test_passes_hash_both_valid():
-    ok, dist = _passes_hash("a1b2c3d4e5f67890", "a1b2c3d4e5f67890", 10)
-    assert ok is True
-    assert dist == 0
-
-
-def test_passes_hash_empty_query():
-    """Empty query hash → False, 999."""
-    ok, dist = _passes_hash("", "a1b2c3d4e5f67890", 10)
-    assert ok is False
-    assert dist == 999
-
-
-def test_passes_hash_empty_candidate():
-    """Empty candidate hash → False, 999."""
-    ok, dist = _passes_hash("a1b2c3d4e5f67890", "", 10)
-    assert ok is False
-    assert dist == 999
-
-
-def test_passes_hash_both_empty():
-    ok, dist = _passes_hash("", "", 10)
-    assert ok is False
-    assert dist == 999
-
-
-def test_passes_hash_beyond_threshold():
-    """Very different hashes exceed threshold."""
-    # Hash 1: all zeros, Hash 2: all ones → max distance
-    ok, dist = _passes_hash("0000000000000000", "ffffffffffffffff", 10)
-    assert ok is False
-    assert dist == 64  # all 64 bits differ
-
-
-# ---------------------------------------------------------------------------
-# _passes_ssim
-# ---------------------------------------------------------------------------
-def test_passes_ssim_missing_path():
-    """Non-existent file path → False, 0.0."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    ok, score = _passes_ssim(img, "/tmp/nonexistent_ssim_test.png", 0.9)
-    assert ok is False
-    assert score == 0.0
-
-
-def test_passes_ssim_empty_path():
-    """Empty path → False."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    ok, score = _passes_ssim(img, "", 0.9)
-    assert ok is False
-    assert score == 0.0
-
-
-def test_passes_ssim_corrupt_file():
-    """Path exists but isn't a valid image → False."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(b"not an image")
-        corrupt_path = f.name
-
-    try:
-        ok, score = _passes_ssim(img, corrupt_path, 0.9)
-        assert ok is False
-        assert score == 0.0
-    finally:
-        Path(corrupt_path).unlink(missing_ok=True)
-
-
-def test_passes_ssim_identical():
-    """Same image compared to itself → high SSIM, passes."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    ok, score = _passes_ssim(img, str(FIXTURES / "red.png"), 0.9)
-    assert ok is True
-    assert score >= 0.9
-
-
-# ---------------------------------------------------------------------------
 # _assign_match_level
 # ---------------------------------------------------------------------------
 def test_assign_match_level_confirmed():
@@ -123,11 +41,11 @@ def test_assign_match_level_confirmed():
 
 
 def test_assign_match_level_suspected():
-    assert _assign_match_level(1) == "suspected"
     assert _assign_match_level(2) == "suspected"
 
 
 def test_assign_match_level_none():
+    assert _assign_match_level(1) == "none"
     assert _assign_match_level(0) == "none"
 
 

@@ -106,13 +106,13 @@ class Settings(BaseSettings):
         base.mkdir(parents=True, exist_ok=True)
         return base
 
-    def _faiss_path_for(self, index_type: str, datasource: str | None = None) -> Path:
+    def _faiss_path_for(self, index_type: str, datasource: str | None = "skin") -> Path:
         return self._base_dir_for(datasource) / f"index.{index_type}.faiss"
 
-    def _metadata_path_for(self, index_type: str, datasource: str | None = None) -> Path:
+    def _metadata_path_for(self, index_type: str, datasource: str | None = "skin") -> Path:
         return self._base_dir_for(datasource) / f"metadata.{index_type}.json"
 
-    def _count_path_for(self, index_type: str, datasource: str | None = None) -> Path:
+    def _count_path_for(self, index_type: str, datasource: str | None = "skin") -> Path:
         return self._base_dir_for(datasource) / f"index.{index_type}.count"
 
     @property
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
         """Binary Faiss index file (default datasource)."""
         return self._binary_faiss_path_for(datasource="skin")
 
-    def _binary_faiss_path_for(self, datasource: str | None = None) -> Path:
+    def _binary_faiss_path_for(self, datasource: str | None = "skin") -> Path:
         return self._base_dir_for(datasource) / "index.binary.faiss"
 
     @property
@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     def images_path(self) -> Path:
         return _resolve(self.images_dir)
 
-    def all_type_faiss_paths(self, datasource: str | None = None) -> list[Path]:
+    def all_type_faiss_paths(self, datasource: str | None = "skin") -> list[Path]:
         """Return paths for all known index types (for bulk cleanup)."""
         return [
             self._faiss_path_for(t, datasource)

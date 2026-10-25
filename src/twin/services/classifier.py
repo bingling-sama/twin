@@ -67,30 +67,71 @@ def _region_has_opaque_pixels(
     return bool(np.any(alpha_slice > alpha_threshold))
 
 
+def _region_has_foreground_opaque(
+    arr: np.ndarray,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    bg_color: np.ndarray,
+    color_threshold: float = 15.0,
+) -> bool:
+    """Check if region contains pixels distinct from background in an opaque texture."""
+    h, w, _ = arr.shape
+    x_start = max(0, min(x0, w))
+    x_end = max(0, min(x1, w))
+    y_start = max(0, min(y0, h))
+    y_end = max(0, min(y1, h))
+
+    if x_start >= x_end or y_start >= y_end:
+        return False
+
+    region_rgb = arr[y_start:y_end, x_start:x_end, :3].astype(np.int16)
+    diff = np.max(np.abs(region_rgb - bg_color.astype(np.int16)), axis=-1)
+    return bool(np.any(diff > color_threshold))
+
+
 def _classify_2_to_1_texture(image: Image.Image, scale: int) -> TextureKind:
     """Heuristic analyzer for 2:1 textures (64x32 base layout)."""
     rgba = image.convert("RGBA")
     arr = np.array(rgba)
 
-    # 1. Right arm & right leg lower regions (x in [46..64], y in [18..32] in 64x32 base coords)
-    skin_right_arm_has_pixels = _region_has_opaque_pixels(
-        arr, 46 * scale, 18 * scale, 64 * scale, 32 * scale
-    )
+    # Check whether the image has any transparent pixels
+    has_transparency = bool(np.any(arr[..., 3] <= 10))
 
-    # 2. Torso front / back (x in [20..36], y in [20..32] in 64x32 base coords)
-    skin_torso_has_pixels = _region_has_opaque_pixels(
-        arr, 20 * scale, 20 * scale, 36 * scale, 32 * scale
-    )
+    if has_transparency:
+        # Standard alpha mask evaluation
+        skin_right_arm_has_pixels = _region_has_opaque_pixels(
+            arr, 46 * scale, 18 * scale, 64 * scale, 32 * scale
+        )
+        skin_torso_has_pixels = _region_has_opaque_pixels(
+            arr, 20 * scale, 20 * scale, 36 * scale, 32 * scale
+        )
+        elytra_region_has_pixels = _region_has_opaque_pixels(
+            arr, 23 * scale, 2 * scale, 45 * scale, 22 * scale
+        )
+        cape_body_has_pixels = _region_has_opaque_pixels(
+            arr, 1 * scale, 1 * scale, 21 * scale, 16 * scale
+        )
+    else:
+        # Fallback for opaque images (e.g. RGB JPG/PNG with solid background).
+        # In Minecraft 64x32 layouts, the bottom-right corner [56..64, 24..32] is
+        # geometrically guaranteed to be unused across skins, capes, and elytra.
+        bg_sample = arr[24 * scale : 32 * scale, 56 * scale : 64 * scale, :3]
+        bg_color = np.median(bg_sample, axis=(0, 1))
 
-    # 3. Elytra wing main region (x in [23..45], y in [2..22] in 64x32 base coords)
-    elytra_region_has_pixels = _region_has_opaque_pixels(
-        arr, 23 * scale, 2 * scale, 45 * scale, 22 * scale
-    )
-
-    # 4. Cape main body (x in [1..21], y in [1..16] in 64x32 base coords)
-    cape_body_has_pixels = _region_has_opaque_pixels(
-        arr, 1 * scale, 1 * scale, 21 * scale, 16 * scale
-    )
+        skin_right_arm_has_pixels = _region_has_foreground_opaque(
+            arr, 46 * scale, 18 * scale, 64 * scale, 32 * scale, bg_color
+        )
+        skin_torso_has_pixels = _region_has_foreground_opaque(
+            arr, 20 * scale, 20 * scale, 36 * scale, 32 * scale, bg_color
+        )
+        elytra_region_has_pixels = _region_has_foreground_opaque(
+            arr, 23 * scale, 2 * scale, 45 * scale, 22 * scale, bg_color
+        )
+        cape_body_has_pixels = _region_has_foreground_opaque(
+            arr, 1 * scale, 1 * scale, 21 * scale, 16 * scale, bg_color
+        )
 
     if skin_right_arm_has_pixels and skin_torso_has_pixels:
         return TextureKind.SKIN_SINGLE

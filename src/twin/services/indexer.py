@@ -396,7 +396,7 @@ class Indexer:
     # Internal helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _count_path_for(type_key: str, datasource: str | None = None) -> Path:
+    def _count_path_for(type_key: str, datasource: str | None = DEFAULT_DATASOURCE) -> Path:
         """Path to the freshness counter for a cached index type."""
         return settings._count_path_for(type_key, datasource=datasource)
 
@@ -1045,17 +1045,18 @@ class Indexer:
             s["elapsed_ms"] = (time.perf_counter() - s["started_at"]) * 1000
         return s
 
-    def _runtime_type_key(self) -> str:
-        """Map the current runtime index class to a cache key.
+    def _runtime_type_key(self, datasource: str = DEFAULT_DATASOURCE) -> str:
+        """Map the current runtime index class to a cache key for datasource.
 
         IndexFlatL2 / GpuIndexFlat → "flat"
         IndexIVFFlat / GpuIndexIVFFlat → "ivf_flat"
         IndexIVFPQ / GpuIndexIVFPQ → "ivf_pq"
         IndexHNSWFlat → "hnsw"
         """
-        if self._index is None:
+        idx = self._indices.get(datasource)
+        if idx is None:
             return "none"
-        name = type(self._index).__name__.replace("GpuIndex", "")
+        name = type(idx).__name__.replace("GpuIndex", "")
         if "IVFPQ" in name:
             return "ivf_pq"
         if "IVFFlat" in name:
@@ -1066,23 +1067,27 @@ class Indexer:
             return "flat"
         return "unknown"
 
-    def _save_for_type(self, type_key: str) -> None:
-        """Persist current index under a specific type key.
+    def _save_for_type(self, type_key: str, datasource: str = DEFAULT_DATASOURCE) -> None:
+        """Persist current index under a specific type key for datasource.
 
         Unlike _save_unlocked(), this writes to the path for *type_key*
         regardless of settings.faiss_index_type.  Also writes a .count file
         so rebuild() can check freshness before loading a cached index.
         Caller must hold _lock.
         """
-        if self._index is None or self._index.ntotal == 0:
+        idx = self._indices.get(datasource)
+        meta = self._metadatas.get(datasource, [])
+        if idx is None or idx.ntotal == 0:
             return
-        cpu_idx = self._maybe_to_cpu(self._index)
-        faiss.write_index(cpu_idx, str(settings._faiss_path_for(type_key)))
-        settings._metadata_path_for(type_key).write_text(
-            json.dumps(self._metadata, ensure_ascii=False, indent=2)
+        cpu_idx = self._maybe_to_cpu(idx)
+        faiss.write_index(cpu_idx, str(settings._faiss_path_for(type_key, datasource=datasource)))
+        settings._metadata_path_for(type_key, datasource=datasource).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2)
         )
-        self._count_path_for(type_key).write_text(str(self._index.ntotal))
-        logger.debug("Saved index as type=%s (%d vectors)", type_key, self._index.ntotal)
+        self._count_path_for(type_key, datasource=datasource).write_text(str(idx.ntotal))
+        logger.debug(
+            "Saved index as type=%s (%d vectors) for ds=%s", type_key, idx.ntotal, datasource
+        )
 
     def _set_rebuild_phase(self, phase: str, n_vectors: int = 0) -> None:
         """Update shared rebuild progress (caller may hold _lock)."""
@@ -1097,8 +1102,169 @@ class Indexer:
             else self._rebuild_state.get("started_at"),
         )
 
-    def rebuild(self) -> dict:
-        """Switch to the current faiss_index_type, preserving all vectors.
+    def _rebuild_datasource(self, datasource: str) -> dict:
+        """Rebuild index for a specific datasource. Caller must hold _lock."""
+        old_type_key = self._runtime_type_key(datasource=datasource)
+        idx = self._indices.get(datasource)
+        meta = self._metadatas.get(datasource, [])
+        n = idx.ntotal if idx else 0
+
+        # ── Phase: saving_current ──
+        if idx is not None and n > 0 and old_type_key != "unknown":
+            self._set_rebuild_phase(f"saving_current_{datasource}", n)
+            self._save_for_type(old_type_key, datasource=datasource)
+            logger.info(
+                "Cached %s index (%d vectors) for ds=%s before switch",
+                old_type_key,
+                n,
+                datasource,
+            )
+
+        target_type = settings.faiss_index_type
+        target_faiss = settings._faiss_path_for(target_type, datasource=datasource)
+        target_meta = settings._metadata_path_for(target_type, datasource=datasource)
+
+        # ── Fast path: loading_cached (fresh or incrementally updatable) ──
+        count_path = self._count_path_for(target_type, datasource=datasource)
+        cached_count = 0
+        if target_faiss.exists() and target_meta.exists() and count_path.exists():
+            try:
+                cached_count = int(count_path.read_text().strip())
+            except Exception:
+                cached_count = 0
+
+        if cached_count > 0:
+            self._set_rebuild_phase(f"loading_cached_{datasource}", n)
+            try:
+                cpu_idx = faiss.read_index(str(target_faiss))
+
+                if hasattr(cpu_idx, "nprobe"):
+                    cpu_idx.nprobe = settings.faiss_nprobe
+                if hasattr(cpu_idx, "hnsw"):
+                    cpu_idx.hnsw.efSearch = settings.faiss_hnsw_ef_search
+
+                # ── Incremental: add missing vectors ──
+                if cached_count < n and idx is not None:
+                    new_count = n - cached_count
+                    logger.info(
+                        "Incrementally adding %d new vectors to cached %s index for ds=%s",
+                        new_count,
+                        target_type,
+                        datasource,
+                    )
+                    active_cpu = self._maybe_to_cpu(idx)
+                    new_vecs = active_cpu.reconstruct_n(cached_count, new_count)
+                    cpu_idx.add(new_vecs.astype(np.float32))
+
+                new_idx = self._maybe_to_gpu(cpu_idx)
+                self._indices[datasource] = new_idx
+                self._dirty_flags[datasource] = True
+                new_name = type(new_idx).__name__.replace("GpuIndex", "")
+
+                if cached_count < n:
+                    # Save updated cache immediately (don't wait for auto-save)
+                    self._save_for_type(target_type, datasource=datasource)
+                    logger.info(
+                        "Updated cached %s: %d → %d vectors for ds=%s",
+                        new_name,
+                        cached_count,
+                        n,
+                        datasource,
+                    )
+                else:
+                    logger.info(
+                        "Switched to cached %s (%d vectors) for ds=%s — instant",
+                        new_name,
+                        n,
+                        datasource,
+                    )
+
+                return {
+                    "datasource": datasource,
+                    "status": "switched",
+                    "index_type": new_name,
+                    "n_vectors": new_idx.ntotal,
+                    "cached": True,
+                    "incremental": cached_count < n,
+                    "added": max(0, n - cached_count),
+                }
+            except Exception as e:
+                logger.warning(
+                    "Cached %s index failed for ds=%s (%s), doing full rebuild",
+                    target_type,
+                    datasource,
+                    e,
+                )
+
+        # ── Empty index ──
+        if n == 0:
+            new_idx = self._create_index()
+            self._indices[datasource] = new_idx
+            self._metadatas[datasource] = []
+            self._dirty_flags[datasource] = False
+            new_name = type(new_idx).__name__.replace("GpuIndex", "")
+            logger.info("Rebuilt empty index as %s for ds=%s", new_name, datasource)
+            return {
+                "datasource": datasource,
+                "status": "rebuilt",
+                "index_type": new_name,
+                "n_vectors": 0,
+                "cached": False,
+            }
+
+        logger.info("Building %s index from %d vectors for ds=%s ...", target_type, n, datasource)
+
+        # ── Phase: extracting vectors ──
+        self._set_rebuild_phase(f"extracting_{datasource}", n)
+        cpu_idx = self._maybe_to_cpu(idx)
+        vectors = cpu_idx.reconstruct_n(0, n)
+        old_metadata = list(meta)
+
+        # ── Phase: building ──
+        self._set_rebuild_phase(f"building_{datasource}", n)
+        self._indices[datasource] = None
+        new_idx = self._create_index(datasource=datasource)
+        new_idx.add(vectors.astype(np.float32))
+        self._indices[datasource] = new_idx
+        self._metadatas[datasource] = old_metadata
+        self._dirty_flags[datasource] = True
+
+        new_name = type(new_idx).__name__.replace("GpuIndex", "")
+        logger.info("Built %s with %d vectors for ds=%s", new_name, n, datasource)
+
+        # ── Phase: training ──
+        target_ivf = settings.faiss_index_type in ("ivf_flat", "ivf_pq")
+        if settings.faiss_auto_upgrade and target_ivf:
+            nlist = self._resolve_nlist(n)
+            if n >= nlist * 39:
+                cn = type(new_idx).__name__
+                if "Flat" in cn and "IVF" not in cn:
+                    self._set_rebuild_phase(f"training_{datasource}", n)
+                    logger.info(
+                        "Auto-training after rebuild (%d vectors, nlist=%d) for ds=%s",
+                        n,
+                        nlist,
+                        datasource,
+                    )
+                    self.train_index(datasource=datasource)
+                    new_idx = self._indices.get(datasource)
+                    new_name = type(new_idx).__name__.replace("GpuIndex", "")
+                    self._dirty_flags[datasource] = True
+
+        # ── Phase: saving ──
+        self._set_rebuild_phase(f"saving_{datasource}", n)
+        self._save_for_type(settings.faiss_index_type, datasource=datasource)
+
+        return {
+            "datasource": datasource,
+            "status": "rebuilt",
+            "index_type": new_name,
+            "n_vectors": n,
+            "cached": False,
+        }
+
+    def rebuild(self, datasource: str | None = None) -> dict:
+        """Switch to the current faiss_index_type, preserving all vectors across datasources.
 
         Fast path: if the target type has a valid saved index on disk, load it
         directly (sub-second for typical sizes).
@@ -1111,146 +1277,37 @@ class Indexer:
 
         Returns a status dict with the new index type and vector count.
         """
-
         try:
             with self._lock:
-                old_type_key = self._runtime_type_key()
-                n = self._index.ntotal if self._index else 0
+                if datasource is not None:
+                    res = self._rebuild_datasource(datasource)
+                    self._set_rebuild_phase("done", res.get("n_vectors", 0))
+                    return res
 
-                # ── Phase: saving_current ──
-                if self._index is not None and n > 0 and old_type_key != "unknown":
-                    self._set_rebuild_phase("saving_current", n)
-                    self._save_for_type(old_type_key)
-                    logger.info("Cached %s index (%d vectors) before switch", old_type_key, n)
+                # Rebuild all mounted/known datasources
+                results = {}
+                total_vectors = 0
+                target_datasources = (
+                    list(self._indices.keys()) if self._indices else list(self.KNOWN_DATASOURCES)
+                )
+                for ds in target_datasources:
+                    res = self._rebuild_datasource(ds)
+                    results[ds] = res
+                    total_vectors += res.get("n_vectors", 0)
 
-                target_type = settings.faiss_index_type
-                target_faiss = settings._faiss_path_for(target_type)
-                target_meta = settings._metadata_path_for(target_type)
-
-                # ── Fast path: loading_cached (fresh or incrementally updatable) ──
-                count_path = self._count_path_for(target_type)
-                cached_count = 0
-                if target_faiss.exists() and target_meta.exists() and count_path.exists():
-                    try:
-                        cached_count = int(count_path.read_text().strip())
-                    except Exception:
-                        cached_count = 0
-
-                if cached_count > 0:
-                    self._set_rebuild_phase("loading_cached", n)
-                    try:
-                        cpu_idx = faiss.read_index(str(target_faiss))
-
-                        if hasattr(cpu_idx, "nprobe"):
-                            cpu_idx.nprobe = settings.faiss_nprobe
-                        if hasattr(cpu_idx, "hnsw"):
-                            cpu_idx.hnsw.efSearch = settings.faiss_hnsw_ef_search
-
-                        # ── Incremental: add missing vectors ──
-                        if cached_count < n:
-                            new_count = n - cached_count
-                            logger.info(
-                                "Incrementally adding %d new vectors to cached %s index",
-                                new_count,
-                                target_type,
-                            )
-                            # Extract only new vectors from active index (IDs cached_count .. n-1)
-                            active_cpu = self._maybe_to_cpu(self._index)
-                            new_vecs = active_cpu.reconstruct_n(cached_count, new_count)
-                            cpu_idx.add(new_vecs.astype(np.float32))
-
-                        self._index = self._maybe_to_gpu(cpu_idx)
-                        self._metadata = list(self._metadata)  # use current full metadata
-                        self._dirty = True
-                        new_name = type(self._index).__name__.replace("GpuIndex", "")
-
-                        if cached_count < n:
-                            # Save updated cache immediately (don't wait for auto-save)
-                            self._save_for_type(target_type)
-                            logger.info(
-                                "Updated cached %s: %d → %d vectors", new_name, cached_count, n
-                            )
-                        else:
-                            logger.info("Switched to cached %s (%d vectors) — instant", new_name, n)
-
-                        self._set_rebuild_phase("done", self._index.ntotal)
-                        return {
-                            "status": "switched",
-                            "index_type": new_name,
-                            "n_vectors": self._index.ntotal,
-                            "cached": True,
-                            "incremental": cached_count < n,
-                            "added": max(0, n - cached_count),
-                        }
-                    except Exception as e:
-                        logger.warning(
-                            "Cached %s index failed (%s), doing full rebuild", target_type, e
-                        )
-
-                # ── Empty index ──
-                if n == 0:
-                    self._index = None
-                    self._index = self._create_index()
-                    self._metadata = []
-                    self._dirty = False
-                    new_name = type(self._index).__name__.replace("GpuIndex", "")
-                    self._set_rebuild_phase("done", 0)
-                    logger.info("Rebuilt empty index as %s", new_name)
-                    return {
-                        "status": "rebuilt",
-                        "index_type": new_name,
-                        "n_vectors": 0,
-                        "cached": False,
-                    }
-
-                logger.info("Building %s index from %d vectors ...", target_type, n)
-
-                # ── Phase: extracting vectors ──
-                self._set_rebuild_phase("extracting", n)
-                cpu_idx = self._maybe_to_cpu(self._index)
-                vectors = cpu_idx.reconstruct_n(0, n)
-                old_metadata = list(self._metadata)
-
-                # ── Phase: building ──
-                self._set_rebuild_phase("building", n)
-                self._index = None
-                self._index = self._create_index()
-                self._index.add(vectors.astype(np.float32))
-                self._metadata = old_metadata
-                self._dirty = True
-
-                new_name = type(self._index).__name__.replace("GpuIndex", "")
-                logger.info("Built %s with %d vectors", new_name, n)
-
-                # ── Phase: training ──
-                target_ivf = settings.faiss_index_type in ("ivf_flat", "ivf_pq")
-                if settings.faiss_auto_upgrade and target_ivf:
-                    nlist = self._resolve_nlist(n)
-                    if n >= nlist * 39:
-                        cn = type(self._index).__name__
-                        if "Flat" in cn and "IVF" not in cn:
-                            self._set_rebuild_phase("training", n)
-                            logger.info(
-                                "Auto-training after rebuild (%d vectors, nlist=%d)", n, nlist
-                            )
-                            self.train_index()
-                            new_name = type(self._index).__name__.replace("GpuIndex", "")
-                            self._dirty = True
-
-                # ── Phase: saving ──
-                self._set_rebuild_phase("saving", n)
-                self._save_for_type(settings.faiss_index_type)
-
-                self._set_rebuild_phase("done", n)
+                self._set_rebuild_phase("done", total_vectors)
+                primary_res = results.get(
+                    self.DEFAULT_DATASOURCE, next(iter(results.values()), {})
+                )
                 return {
-                    "status": "rebuilt",
-                    "index_type": new_name,
-                    "n_vectors": n,
-                    "cached": False,
+                    **primary_res,
+                    "datasources": results,
+                    "total_vectors": total_vectors,
                 }
         except Exception:
             self._set_rebuild_phase("done", 0)
             raise
+
 
     # ------------------------------------------------------------------
     # Auto-save background thread
