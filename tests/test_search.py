@@ -1,6 +1,5 @@
 """Tests for search pipeline — helpers, edge cases, and full flow."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,8 +13,6 @@ from twin.services.search import (
     _build_response,
     _empty,
     _final_sort,
-    _passes_hash,
-    _passes_ssim,
     search,
 )
 
@@ -36,85 +33,6 @@ def _clear_index():
 
 
 # ---------------------------------------------------------------------------
-# _passes_hash
-# ---------------------------------------------------------------------------
-def test_passes_hash_both_valid():
-    ok, dist = _passes_hash("a1b2c3d4e5f67890", "a1b2c3d4e5f67890", 10)
-    assert ok is True
-    assert dist == 0
-
-
-def test_passes_hash_empty_query():
-    """Empty query hash → False, 999."""
-    ok, dist = _passes_hash("", "a1b2c3d4e5f67890", 10)
-    assert ok is False
-    assert dist == 999
-
-
-def test_passes_hash_empty_candidate():
-    """Empty candidate hash → False, 999."""
-    ok, dist = _passes_hash("a1b2c3d4e5f67890", "", 10)
-    assert ok is False
-    assert dist == 999
-
-
-def test_passes_hash_both_empty():
-    ok, dist = _passes_hash("", "", 10)
-    assert ok is False
-    assert dist == 999
-
-
-def test_passes_hash_beyond_threshold():
-    """Very different hashes exceed threshold."""
-    # Hash 1: all zeros, Hash 2: all ones → max distance
-    ok, dist = _passes_hash("0000000000000000", "ffffffffffffffff", 10)
-    assert ok is False
-    assert dist == 64  # all 64 bits differ
-
-
-# ---------------------------------------------------------------------------
-# _passes_ssim
-# ---------------------------------------------------------------------------
-def test_passes_ssim_missing_path():
-    """Non-existent file path → False, 0.0."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    ok, score = _passes_ssim(img, "/tmp/nonexistent_ssim_test.png", 0.9)
-    assert ok is False
-    assert score == 0.0
-
-
-def test_passes_ssim_empty_path():
-    """Empty path → False."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    ok, score = _passes_ssim(img, "", 0.9)
-    assert ok is False
-    assert score == 0.0
-
-
-def test_passes_ssim_corrupt_file():
-    """Path exists but isn't a valid image → False."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        f.write(b"not an image")
-        corrupt_path = f.name
-
-    try:
-        ok, score = _passes_ssim(img, corrupt_path, 0.9)
-        assert ok is False
-        assert score == 0.0
-    finally:
-        Path(corrupt_path).unlink(missing_ok=True)
-
-
-def test_passes_ssim_identical():
-    """Same image compared to itself → high SSIM, passes."""
-    img = Image.open(FIXTURES / "red.png").convert("RGB")
-    ok, score = _passes_ssim(img, str(FIXTURES / "red.png"), 0.9)
-    assert ok is True
-    assert score >= 0.9
-
-
-# ---------------------------------------------------------------------------
 # _assign_match_level
 # ---------------------------------------------------------------------------
 def test_assign_match_level_confirmed():
@@ -123,11 +41,11 @@ def test_assign_match_level_confirmed():
 
 
 def test_assign_match_level_suspected():
-    assert _assign_match_level(1) == "suspected"
     assert _assign_match_level(2) == "suspected"
 
 
 def test_assign_match_level_none():
+    assert _assign_match_level(1) == "none"
     assert _assign_match_level(0) == "none"
 
 
@@ -220,6 +138,9 @@ def test_build_response():
         meta={"dhash": "111", "phash": "222", "path": "/tmp/cand.png"},
         dhash_distance=2,
         phash_distance=4,
+        verifier_score=0.98,
+        verifier_type="diffmask",
+        datasource="skin",
         ssim_score=0.98,
         stages_passed=3,
     )
@@ -228,9 +149,34 @@ def test_build_response():
     cand_item = resp_cand["results"][0]
     assert cand_item["id"] == 1
     assert cand_item["match_level"] == "confirmed"
+    assert cand_item["verifier_score"] == 0.98
+    assert cand_item["verifier_type"] == "diffmask"
+    assert cand_item["datasource"] == "skin"
     assert cand_item["dhash_hex"] == "111"
     assert cand_item["phash_hex"] == "222"
     assert cand_item["path"] == "/tmp/cand.png"
+
+
+def test_final_sort_verifier_score_priority():
+    """Candidates in the same stage (confirmed) are sorted by verifier_score DESC."""
+    cands = [
+        SearchCandidate(
+            id=1, filename="1.png", distance=0.1, meta={},
+            stages_passed=3, verifier_score=0.92, phash_distance=2
+        ),
+        SearchCandidate(
+            id=2, filename="2.png", distance=0.2, meta={},
+            stages_passed=3, verifier_score=1.00, phash_distance=4
+        ),
+        SearchCandidate(
+            id=3, filename="3.png", distance=0.0, meta={},
+            stages_passed=3, verifier_score=0.95, phash_distance=0
+        ),
+    ]
+    _final_sort(cands)
+    ids = [c.id for c in cands]
+    # id=2 (score 1.0) must come first, followed by id=3 (0.95), then id=1 (0.92)
+    assert ids == [2, 3, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -269,3 +215,15 @@ def test_search_explicit_params():
     result = search(img, top_k=10, dhash_threshold=5, phash_threshold=5, ssim_threshold=0.80)
     assert result["count"] == 1
     assert result["results"][0]["filename"] == "red.png"
+
+
+def test_search_unknown_texture_returns_empty():
+    """Searching with an unrecognized texture dimension returns empty and datasource='unknown'."""
+    _ensure_model()
+    img = Image.new("RGBA", (100, 50), (128, 128, 128, 255))
+    result = search(img)
+    assert result["count"] == 0
+    assert result["results"] == []
+    assert result["datasource"] == "unknown"
+    assert "warning" in result["stages"]["classifier"]
+

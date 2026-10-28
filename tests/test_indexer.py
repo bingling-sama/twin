@@ -23,7 +23,10 @@ def _reset_indexer_settings():
 
 
 def _make_settings(tmpdir: str) -> Settings:
-    return Settings(index_path=tmpdir, embedding_dim=settings.embedding_dim)
+    s = Settings(index_path=tmpdir, embedding_dim=settings.embedding_dim)
+    s.ensure_dirs()
+    return s
+
 
 
 def _make_vector(dim: int | None = None) -> np.ndarray:

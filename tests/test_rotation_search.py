@@ -71,11 +71,11 @@ def test_asymmetric_image_rotation_full_funnel(tmp_path):
     from twin.services.embedding import compute_embedding
 
     # Create asymmetric test image (gradient + pattern)
-    arr = np.zeros((100, 100, 3), dtype=np.uint8)
-    arr[:50, :50] = [255, 0, 0]  # Top-left red
-    arr[50:, :50] = [0, 255, 0]  # Bottom-left green
-    arr[:50, 50:] = [0, 0, 255]  # Top-right blue
-    arr[50:, 50:] = [255, 255, 0]  # Bottom-right yellow
+    arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    arr[:32, :32] = [255, 0, 0]  # Top-left red
+    arr[32:, :32] = [0, 255, 0]  # Bottom-left green
+    arr[:32, 32:] = [0, 0, 255]  # Top-right blue
+    arr[32:, 32:] = [255, 255, 0]  # Bottom-right yellow
     img = Image.fromarray(arr, mode="RGB")
 
     saved_path = tmp_path / "asym.png"
@@ -118,11 +118,11 @@ def test_asymmetric_image_rotation_stage1_recall(tmp_path):
     from twin.services.embedding import compute_embedding
 
     # Create target asymmetric test image
-    arr = np.zeros((100, 100, 3), dtype=np.uint8)
-    arr[:50, :50] = [255, 0, 0]
-    arr[50:, :50] = [0, 255, 0]
-    arr[:50, 50:] = [0, 0, 255]
-    arr[50:, 50:] = [255, 255, 0]
+    arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    arr[:32, :32] = [255, 0, 0]
+    arr[32:, :32] = [0, 255, 0]
+    arr[:32, 32:] = [0, 0, 255]
+    arr[32:, 32:] = [255, 255, 0]
     img = Image.fromarray(arr, mode="RGB")
     target_path = tmp_path / "target.png"
     img.save(target_path)
@@ -138,7 +138,7 @@ def test_asymmetric_image_rotation_stage1_recall(tmp_path):
 
     # Add 5 distractor images
     for i in range(5):
-        d_arr = np.full((100, 100, 3), fill_value=i * 40, dtype=np.uint8)
+        d_arr = np.full((64, 64, 3), fill_value=i * 40, dtype=np.uint8)
         d_img = Image.fromarray(d_arr, mode="RGB")
         d_path = tmp_path / f"distractor_{i}.png"
         d_img.save(d_path)

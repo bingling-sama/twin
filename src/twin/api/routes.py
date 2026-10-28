@@ -127,7 +127,7 @@ def search_endpoint(file: UploadFile = File(...)):
 def search_text_endpoint(body: TextSearchRequest):
     """Search for images using a natural language text query via CLIP."""
     try:
-        result = search_by_text(body.query, body.k)
+        result = search_by_text(body.query, body.k, datasource=body.datasource)
         return TextSearchResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -148,7 +148,10 @@ def index_endpoint(file: UploadFile = File(...)):
     """Upload a single image to the index."""
     content = file.file.read()
     image = _validate_image(file.filename or "unknown", content)
-    result = index_single(image, file.filename or "unknown", content)
+    try:
+        result = index_single(image, file.filename or "unknown", content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return IndexStatus(**result)
 
 

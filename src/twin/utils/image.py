@@ -10,10 +10,18 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff"}
 
 
 def load_image(path: str | Path) -> Image.Image | None:
-    """Safely load an image from path. Returns None if file missing/corrupt."""
+    """Safely load an image from path. Returns None if file missing/corrupt.
+
+    Preserves RGBA transparency for Minecraft skins/capes and transparent images;
+    converts opaque formats (JPEG, grayscale, CMYK) to RGB.
+    """
     try:
-        img = Image.open(path).convert("RGB")
+        img = Image.open(path)
         img.load()
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            return img.convert("RGBA")
+        if img.mode != "RGB":
+            return img.convert("RGB")
         return img
     except Exception:
         logger.warning("Failed to load image: %s", path, exc_info=True)
