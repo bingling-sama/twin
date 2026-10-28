@@ -2,91 +2,95 @@
 
 | Strategy | Recall@1 | Recall@5 | MRR | Suspected | Confirmed | P50 Latency | Mean Latency |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **current_diffmask** | **92.92%** | 93.33% | 0.9330 | 92.08% | 0.00% | 2.01ms | 2.02ms |
-| **ssim_verifier** | **92.92%** | 93.33% | 0.9330 | 92.08% | 0.00% | 1.81ms | 1.80ms |
-| **pure_phash** | **92.92%** | 93.33% | 0.9330 | 92.08% | 0.00% | 1.80ms | 1.80ms |
-| **pure_clip** | **80.42%** | 92.50% | 0.8578 | 0.00% | 0.00% | 9.86ms | 10.24ms |
+| **current_diffmask** | **81.67%** | 91.94% | 0.8599 | 82.22% | 11.39% | 14.16ms | 13.92ms |
+| **ssim_verifier** | **95.00%** | 95.00% | 0.9500 | 16.11% | 78.06% | 56.93ms | 55.36ms |
+| **pure_phash** | **74.17%** | 86.11% | 0.7926 | 82.22% | 11.39% | 11.87ms | 11.83ms |
+| **pure_clip** | **82.50%** | 93.61% | 0.8738 | 0.00% | 0.00% | 12.02ms | 12.61ms |
 
 ### Strategy: current_diffmask
-- **Total Queries**: 240
-- **Recall@1**: 92.92%
-- **Recall@5**: 93.33%
-- **MRR**: 0.9330
-- **Detected (Confirmed + Suspected)**: 92.08%
-- **Confirmed Rate**: 0.00%
-- **Suspected Rate**: 92.08%
-- **Latency (P50 / P95 / Mean)**: 2.01ms / 2.67ms / 2.02ms
+- **Total Queries**: 360
+- **Recall@1**: 81.67%
+- **Recall@5**: 91.94%
+- **MRR**: 0.8599
+- **Detected (Confirmed + Suspected)**: 93.61%
+- **Confirmed Rate**: 11.39%
+- **Suspected Rate**: 82.22%
+- **Latency (P50 / P95 / Mean)**: 14.16ms / 18.34ms / 13.92ms
 
 | Perturbation | Count | Recall@1 | Recall@5 | Suspected | Confirmed | P50 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `bright_contrast` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 2.08ms |
-| `composite` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 2.00ms |
-| `cool_tint` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 2.00ms |
-| `grayscale` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 2.08ms |
-| `hue_shift_15pct` | 30 | 90.0% | 93.3% | 93.3% | 0.0% | 2.03ms |
-| `jpeg_q75` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.98ms |
-| `pixel_noise` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.87ms |
-| `warm_tint` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.99ms |
+| `bright_contrast` | 40 | 77.5% | 92.5% | 95.0% | 0.0% | 14.10ms |
+| `composite` | 40 | 57.5% | 82.5% | 92.5% | 0.0% | 14.13ms |
+| `cool_tint` | 40 | 67.5% | 95.0% | 95.0% | 0.0% | 14.31ms |
+| `grayscale` | 40 | 90.0% | 92.5% | 90.0% | 5.0% | 14.48ms |
+| `hue_shift_15pct` | 40 | 95.0% | 97.5% | 90.0% | 5.0% | 14.03ms |
+| `identity` | 40 | 92.5% | 92.5% | 0.0% | 92.5% | 14.13ms |
+| `jpeg_q75` | 40 | 95.0% | 95.0% | 92.5% | 0.0% | 14.29ms |
+| `pixel_noise` | 40 | 92.5% | 92.5% | 90.0% | 0.0% | 14.18ms |
+| `warm_tint` | 40 | 67.5% | 87.5% | 95.0% | 0.0% | 13.92ms |
 
 ### Strategy: ssim_verifier
-- **Total Queries**: 240
-- **Recall@1**: 92.92%
-- **Recall@5**: 93.33%
-- **MRR**: 0.9330
-- **Detected (Confirmed + Suspected)**: 92.08%
-- **Confirmed Rate**: 0.00%
-- **Suspected Rate**: 92.08%
-- **Latency (P50 / P95 / Mean)**: 1.81ms / 2.27ms / 1.80ms
+- **Total Queries**: 360
+- **Recall@1**: 95.00%
+- **Recall@5**: 95.00%
+- **MRR**: 0.9500
+- **Detected (Confirmed + Suspected)**: 94.17%
+- **Confirmed Rate**: 78.06%
+- **Suspected Rate**: 16.11%
+- **Latency (P50 / P95 / Mean)**: 56.93ms / 76.06ms / 55.36ms
 
 | Perturbation | Count | Recall@1 | Recall@5 | Suspected | Confirmed | P50 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `bright_contrast` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.80ms |
-| `composite` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.75ms |
-| `cool_tint` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.81ms |
-| `grayscale` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.73ms |
-| `hue_shift_15pct` | 30 | 90.0% | 93.3% | 93.3% | 0.0% | 1.77ms |
-| `jpeg_q75` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.90ms |
-| `pixel_noise` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.80ms |
-| `warm_tint` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.87ms |
+| `bright_contrast` | 40 | 97.5% | 97.5% | 2.5% | 95.0% | 57.88ms |
+| `composite` | 40 | 95.0% | 95.0% | 42.5% | 50.0% | 58.86ms |
+| `cool_tint` | 40 | 95.0% | 95.0% | 32.5% | 62.5% | 55.05ms |
+| `grayscale` | 40 | 95.0% | 95.0% | 2.5% | 92.5% | 56.13ms |
+| `hue_shift_15pct` | 40 | 97.5% | 97.5% | 12.5% | 85.0% | 54.66ms |
+| `identity` | 40 | 92.5% | 92.5% | 0.0% | 92.5% | 59.47ms |
+| `jpeg_q75` | 40 | 95.0% | 95.0% | 2.5% | 90.0% | 57.49ms |
+| `pixel_noise` | 40 | 92.5% | 92.5% | 7.5% | 82.5% | 58.15ms |
+| `warm_tint` | 40 | 95.0% | 95.0% | 42.5% | 52.5% | 56.69ms |
 
 ### Strategy: pure_phash
-- **Total Queries**: 240
-- **Recall@1**: 92.92%
-- **Recall@5**: 93.33%
-- **MRR**: 0.9330
-- **Detected (Confirmed + Suspected)**: 92.08%
-- **Confirmed Rate**: 0.00%
-- **Suspected Rate**: 92.08%
-- **Latency (P50 / P95 / Mean)**: 1.80ms / 2.30ms / 1.80ms
+- **Total Queries**: 360
+- **Recall@1**: 74.17%
+- **Recall@5**: 86.11%
+- **MRR**: 0.7926
+- **Detected (Confirmed + Suspected)**: 93.61%
+- **Confirmed Rate**: 11.39%
+- **Suspected Rate**: 82.22%
+- **Latency (P50 / P95 / Mean)**: 11.87ms / 15.43ms / 11.83ms
 
 | Perturbation | Count | Recall@1 | Recall@5 | Suspected | Confirmed | P50 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `bright_contrast` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.75ms |
-| `composite` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.79ms |
-| `cool_tint` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.70ms |
-| `grayscale` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.82ms |
-| `hue_shift_15pct` | 30 | 90.0% | 93.3% | 93.3% | 0.0% | 1.89ms |
-| `jpeg_q75` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.76ms |
-| `pixel_noise` | 30 | 93.3% | 93.3% | 90.0% | 0.0% | 1.86ms |
-| `warm_tint` | 30 | 93.3% | 93.3% | 93.3% | 0.0% | 1.78ms |
+| `bright_contrast` | 40 | 70.0% | 80.0% | 95.0% | 0.0% | 11.69ms |
+| `composite` | 40 | 42.5% | 60.0% | 92.5% | 0.0% | 12.17ms |
+| `cool_tint` | 40 | 47.5% | 87.5% | 95.0% | 0.0% | 11.94ms |
+| `grayscale` | 40 | 90.0% | 92.5% | 90.0% | 5.0% | 11.72ms |
+| `hue_shift_15pct` | 40 | 95.0% | 97.5% | 90.0% | 5.0% | 11.67ms |
+| `identity` | 40 | 92.5% | 92.5% | 0.0% | 92.5% | 11.91ms |
+| `jpeg_q75` | 40 | 95.0% | 95.0% | 92.5% | 0.0% | 11.94ms |
+| `pixel_noise` | 40 | 92.5% | 92.5% | 90.0% | 0.0% | 11.77ms |
+| `warm_tint` | 40 | 42.5% | 77.5% | 95.0% | 0.0% | 12.07ms |
 
 ### Strategy: pure_clip
-- **Total Queries**: 240
-- **Recall@1**: 80.42%
-- **Recall@5**: 92.50%
-- **MRR**: 0.8578
+- **Total Queries**: 360
+- **Recall@1**: 82.50%
+- **Recall@5**: 93.61%
+- **MRR**: 0.8738
 - **Detected (Confirmed + Suspected)**: 0.00%
 - **Confirmed Rate**: 0.00%
 - **Suspected Rate**: 0.00%
-- **Latency (P50 / P95 / Mean)**: 9.86ms / 13.77ms / 10.24ms
+- **Latency (P50 / P95 / Mean)**: 12.02ms / 17.99ms / 12.61ms
 
 | Perturbation | Count | Recall@1 | Recall@5 | Suspected | Confirmed | P50 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `bright_contrast` | 30 | 100.0% | 100.0% | 0.0% | 0.0% | 9.81ms |
-| `composite` | 30 | 60.0% | 90.0% | 0.0% | 0.0% | 10.04ms |
-| `cool_tint` | 30 | 93.3% | 100.0% | 0.0% | 0.0% | 9.86ms |
-| `grayscale` | 30 | 50.0% | 56.7% | 0.0% | 0.0% | 9.91ms |
-| `hue_shift_15pct` | 30 | 73.3% | 96.7% | 0.0% | 0.0% | 9.72ms |
-| `jpeg_q75` | 30 | 70.0% | 96.7% | 0.0% | 0.0% | 10.02ms |
-| `pixel_noise` | 30 | 100.0% | 100.0% | 0.0% | 0.0% | 9.74ms |
-| `warm_tint` | 30 | 96.7% | 100.0% | 0.0% | 0.0% | 9.69ms |
+| `bright_contrast` | 40 | 100.0% | 100.0% | 0.0% | 0.0% | 11.72ms |
+| `composite` | 40 | 62.5% | 92.5% | 0.0% | 0.0% | 12.61ms |
+| `cool_tint` | 40 | 95.0% | 100.0% | 0.0% | 0.0% | 12.23ms |
+| `grayscale` | 40 | 47.5% | 57.5% | 0.0% | 0.0% | 11.98ms |
+| `hue_shift_15pct` | 40 | 72.5% | 95.0% | 0.0% | 0.0% | 12.22ms |
+| `identity` | 40 | 100.0% | 100.0% | 0.0% | 0.0% | 12.22ms |
+| `jpeg_q75` | 40 | 70.0% | 97.5% | 0.0% | 0.0% | 11.31ms |
+| `pixel_noise` | 40 | 100.0% | 100.0% | 0.0% | 0.0% | 11.58ms |
+| `warm_tint` | 40 | 95.0% | 100.0% | 0.0% | 0.0% | 12.30ms |

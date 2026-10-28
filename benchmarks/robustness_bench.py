@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -190,34 +191,38 @@ def main():
     anchors = sample_anchor_dataset(sample_size=args.samples, seed=args.seed)
     logger.info("Sampled %d anchor textures successfully.", len(anchors))
 
-    logger.info("Indexing anchor textures into in-memory Faiss index...")
-    populate_benchmark_index(anchors)
-    logger.info("Index populated. Indexer count: %d", indexer.count)
-
-    logger.info("Generating perturbed queries across 8 perturbation types...")
-    queries = build_evaluation_queries(anchors)
-    logger.info("Generated %d perturbed query test cases.", len(queries))
-
     reports: list[BenchmarkReport] = []
 
-    for s_name in args.strategies:
-        logger.info("Evaluating strategy '%s' against %d queries...", s_name, len(queries))
-        fn = AVAILABLE_STRATEGIES[s_name]
-        rep = evaluate_strategy(
-            strategy_name=s_name,
-            search_fn=lambda q, fn=fn: fn(q, top_k=args.top_k),
-            queries=queries,
-        )
-        reports.append(rep)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        logger.info("Indexing anchor textures into in-memory Faiss index and temp storage...")
+        populate_benchmark_index(anchors, tmp_dir=tmp_dir)
+        logger.info("Index populated. Indexer count: %d", indexer.count)
+
         logger.info(
-            "[%s] Recall@1=%.2f%%, Recall@5=%.2f%%, Suspected=%.2f%%, Confirmed=%.2f%%, P50=%.2fms",
-            s_name,
-            rep.recall_at_1 * 100,
-            rep.recall_at_5 * 100,
-            rep.suspected_rate * 100,
-            rep.confirmed_rate * 100,
-            rep.latency_p50_ms,
+            "Generating evaluation queries across perturbation types (with identity baseline)..."
         )
+        queries = build_evaluation_queries(anchors)
+        logger.info("Generated %d evaluation query test cases.", len(queries))
+
+        for s_name in args.strategies:
+            logger.info("Evaluating strategy '%s' against %d queries...", s_name, len(queries))
+            fn = AVAILABLE_STRATEGIES[s_name]
+            rep = evaluate_strategy(
+                strategy_name=s_name,
+                search_fn=lambda q, fn=fn: fn(q, top_k=args.top_k),
+                queries=queries,
+            )
+            reports.append(rep)
+            logger.info(
+                "[%s] Recall@1=%.2f%%, Recall@5=%.2f%%, "
+                "Suspected=%.2f%%, Confirmed=%.2f%%, P50=%.2fms",
+                s_name,
+                rep.recall_at_1 * 100,
+                rep.recall_at_5 * 100,
+                rep.suspected_rate * 100,
+                rep.confirmed_rate * 100,
+                rep.latency_p50_ms,
+            )
 
     # Print markdown summaries
     print("\n" + "=" * 80)

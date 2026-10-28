@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -81,14 +82,28 @@ class BenchmarkReport:
         return "\n".join(lines)
 
 
-def populate_benchmark_index(anchors: list[AnchorSample]) -> None:
-    """Index anchor textures cleanly into the singleton indexer."""
+def populate_benchmark_index(
+    anchors: list[AnchorSample],
+    tmp_dir: str | Path | None = None,
+) -> None:
+    """Index anchor textures cleanly into the singleton indexer.
+
+    If tmp_dir is provided, anchor textures are saved as physical PNG files
+    so that active_verifier.verify_path() can read authentic RGBA textures from disk.
+    """
     indexer.clear()
     for a in anchors:
         vec = compute_embedding(a.image)
+        if tmp_dir:
+            cand_disk_path = Path(tmp_dir) / a.filename
+            a.image.save(cand_disk_path)
+            cand_path_str = str(cand_disk_path)
+        else:
+            cand_path_str = f"/virtual/{a.datasource}/{a.filename}"
+
         meta = {
             "filename": a.filename,
-            "path": f"/virtual/{a.datasource}/{a.filename}",
+            "path": cand_path_str,
             "datasource": a.datasource,
             "texture_type": a.texture_type.value,
             "ahash": compute_ahash(a.image),

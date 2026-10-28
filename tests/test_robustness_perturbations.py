@@ -9,13 +9,17 @@ from benchmarks.robustness.dataset import (
     build_evaluation_queries,
     sample_anchor_dataset,
 )
+from benchmarks.robustness.evaluator import populate_benchmark_index
 from benchmarks.robustness.perturbations import (
     ALL_PERTURBATIONS,
     apply_color_tint,
     apply_grayscale,
     apply_hue_shift,
+    apply_identity,
 )
 from twin.services.classifier import TextureKind
+from twin.services.verifiers import DiffMaskVerifier
+from twin.utils.image import load_image
 
 
 @pytest.fixture
@@ -97,3 +101,49 @@ def test_build_evaluation_queries():
         assert q.target_filename in [a.filename for a in anchors]
         assert q.perturbation_type in ALL_PERTURBATIONS
         assert q.image.size[0] >= 64 and q.image.size[0] % 64 == 0
+
+
+def test_identity_operator(sample_rgba_skin):
+    """Identity operator must return an identical duplicate image."""
+    out = apply_identity(sample_rgba_skin)
+    np.testing.assert_array_equal(np.array(out), np.array(sample_rgba_skin))
+
+
+def test_load_image_preserves_rgba(tmp_path):
+    """load_image must preserve RGBA transparency for Minecraft textures and RGB for opaque."""
+    rgba_path = tmp_path / "test_rgba.png"
+    img_rgba = Image.new("RGBA", (64, 64), (10, 20, 30, 128))
+    img_rgba.save(rgba_path)
+
+    loaded_rgba = load_image(rgba_path)
+    assert loaded_rgba is not None
+    assert loaded_rgba.mode == "RGBA"
+    assert loaded_rgba.getpixel((0, 0)) == (10, 20, 30, 128)
+
+    rgb_path = tmp_path / "test_rgb.jpg"
+    img_rgb = Image.new("RGB", (64, 64), (100, 150, 200))
+    img_rgb.save(rgb_path)
+
+    loaded_rgb = load_image(rgb_path)
+    assert loaded_rgb is not None
+    assert loaded_rgb.mode == "RGB"
+
+
+def test_populate_benchmark_index_with_temp_dir(tmp_path):
+    """populate_benchmark_index with tmp_dir must persist files and enable DiffMask verification."""
+    from twin.models.clip_model import load as load_clip
+    load_clip()
+
+    anchors = sample_anchor_dataset(sample_size=2, seed=42)
+    populate_benchmark_index(anchors, tmp_dir=tmp_path)
+
+    verifier = DiffMaskVerifier()
+    for a in anchors:
+        saved_file = tmp_path / a.filename
+        assert saved_file.exists(), f"Anchor file {a.filename} was not saved to tmp_dir"
+
+        # Verify against saved path directly
+        res = verifier.verify_path(a.image, str(saved_file))
+        assert res.passed is True
+        assert res.diff_ratio == 0.0
+        assert res.score == 1.0

@@ -102,6 +102,11 @@ def apply_pixel_noise(
     return _merge_alpha(Image.fromarray(noisy_arr, mode="RGB"), alpha)
 
 
+def apply_identity(image: Image.Image) -> Image.Image:
+    """Return unmodified clone as ground truth baseline duplicate."""
+    return image.copy()
+
+
 def apply_composite(image: Image.Image, seed: int | None = 42) -> Image.Image:
     """Apply realistic composite degradation: color tint + brightness + JPEG artifacts."""
     out = apply_color_tint(image, tint_rgb=(255, 200, 170), strength=0.20)
@@ -111,6 +116,7 @@ def apply_composite(image: Image.Image, seed: int | None = 42) -> Image.Image:
 
 
 ALL_PERTURBATIONS: dict[str, Callable[[Image.Image], Image.Image]] = {
+    "identity": apply_identity,
     "grayscale": apply_grayscale,
     "warm_tint": lambda img: apply_color_tint(img, tint_rgb=(255, 190, 150), strength=0.25),
     "cool_tint": lambda img: apply_color_tint(img, tint_rgb=(150, 190, 255), strength=0.25),
