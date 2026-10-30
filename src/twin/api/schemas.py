@@ -181,3 +181,35 @@ class ConfigResponse(BaseModel):
 # --- Error ---
 class ErrorResponse(BaseModel):
     detail: str
+
+
+# --- Seedless Discovery ---
+class DiscoveredMemberItem(BaseModel):
+    id: int
+    filename: str
+    datasource: str = "skin"
+    dhash_distance: int = 0
+    phash_distance: int = 0
+    verifier_score: float = 0.0
+    diff_ratio: float = 0.0
+    match_level: str = "confirmed"  # "confirmed" | "suspected"
+    path: str = ""
+
+
+class SimilarBatchItem(BaseModel):
+    batch_id: int
+    size: int
+    mode: str = "confirmed"
+    datasource: str = "skin"
+    seed: DiscoveredMemberItem
+    members: list[DiscoveredMemberItem]
+    max_diff_ratio: float = 0.0
+
+
+class DiscoverResponse(BaseModel):
+    batches: list[SimilarBatchItem]
+    count: int
+    total_probes: int
+    query_time_ms: float
+    datasource: str = "skin"
+    mode: str = "confirmed"
