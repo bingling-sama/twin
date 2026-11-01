@@ -213,3 +213,4 @@ class DiscoverResponse(BaseModel):
     query_time_ms: float
     datasource: str = "skin"
     mode: str = "confirmed"
+    stages: dict = Field(default_factory=dict)

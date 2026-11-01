@@ -1,17 +1,19 @@
-"""Seedless Similar Texture Discovery via Greedy Leader Elimination (Phase 1).
+"""Seedless Similar Texture Discovery via Greedy Leader Elimination.
 
 Discovers batches of mutually similar or duplicate Minecraft textures across
 indexed assets without requiring an input query image.
 
-Core Algorithm: Greedy Leader Elimination
+Core Algorithm: Greedy Leader Dynamic Elimination
 1. Maintains an unvisited pool of indexed asset IDs.
-2. Selects pivot seed (supports random, sequential, or biased selection).
+2. Selects pivot seed (supports random or sequential strategy).
 3. Recalls nearest neighbors via Faiss binary perceptual hash index (IndexBinaryFlat).
-4. Verifies candidate similarity against seed using active Verifier (DiffMaskVerifier).
-5. If cluster size >= 2 (seed + >= 1 verified neighbors):
-   - Constructs a SimilarBatch.
+4. Loads images in parallel via load_images() with local cache.
+5. Verifies candidate similarity against seed using DiffMaskVerifier.
+6. If cluster size >= 2 (seed + >= 1 verified neighbors):
+   - Constructs a SimilarBatchItem.
    - Eliminates all cluster members from unvisited pool (prevents transitivity collapse).
-6. Repeats until requested max_batches reached or unvisited pool / max_probes exhausted.
+7. Repeats until requested max_batches reached or unvisited pool / max_probes exhausted.
+8. Returns batches with detailed stage-level telemetry metrics (Show your work).
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ from PIL import Image
 from twin.core.config import settings
 from twin.services.hasher import hamming_distance
 from twin.services.indexer import indexer
-from twin.services.verifiers import VerifyResult, get_verifier
-from twin.utils.image import load_image
+from twin.services.verifiers import DiffMaskVerifier
+from twin.utils.image import load_images
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +42,6 @@ def discover_similar_batches(
     mode: str = "confirmed",  # "confirmed" | "variants"
     max_probes: int = 200,
     seed_strategy: str = "random",  # "random" | "sequential"
-    verifier_type: str | None = None,
-    images_map: dict[str, Image.Image] | None = None,
 ) -> dict[str, Any]:
     """Discover batches of similar textures without an input seed image.
 
@@ -49,19 +49,27 @@ def discover_similar_batches(
         datasource: Datasource partition ("skin" or "cape").
         max_batches: Maximum number of batches to return.
         batch_size: Maximum total size of each batch (seed + peers).
-        mode: "confirmed" (strict duplicates, diff_ratio <= 0.05) or
-              "variants" (recolors/edits, Hamming <= 4, diff_ratio <= 0.20).
+        mode: "confirmed" (strict duplicates) or "variants" (recolors/edits).
         max_probes: Maximum number of seed exploration attempts.
         seed_strategy: "random" or "sequential".
-        verifier_type: Override verifier ("diffmask" or "ssim").
-        images_map: Optional in-memory mapping from filename to PIL Image
-            (useful for testing/benchmarks).
 
     Returns:
-        Dictionary containing discovered batches, count, probes, and performance metrics.
+        Dictionary containing discovered batches, count, probes, performance metrics,
+        and stage-level telemetry.
     """
     t0 = time.perf_counter()
     total_items = indexer.get_count(datasource=datasource)
+
+    empty_stages = {
+        "recall": {"probes_evaluated": 0, "candidates_recalled": 0, "elapsed_ms": 0.0},
+        "io_load": {"images_loaded": 0, "elapsed_ms": 0.0},
+        "verify": {
+            "verifier": "DiffMaskVerifier",
+            "pairs_verified": 0,
+            "batches_formed": 0,
+            "elapsed_ms": 0.0,
+        },
+    }
 
     if total_items < 2:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 3)
@@ -72,16 +80,17 @@ def discover_similar_batches(
             "query_time_ms": elapsed_ms,
             "datasource": datasource,
             "mode": mode,
+            "stages": empty_stages,
         }
 
-    # Threshold calibration based on mode
+    # Threshold calibration based on mode (from centralized settings)
     if mode == "confirmed":
-        max_hamming = 2
-        max_diff_ratio = settings.diffmask_diff_ratio_threshold
+        max_hamming = settings.discover_confirmed_hamming
+        max_diff_ratio = settings.discover_confirmed_diff_ratio
         target_match_level = "confirmed"
     else:  # "variants"
-        max_hamming = 4
-        max_diff_ratio = 0.20
+        max_hamming = settings.discover_variants_hamming
+        max_diff_ratio = settings.discover_variants_diff_ratio
         target_match_level = "suspected"
 
     # Initialize unvisited pool
@@ -91,9 +100,20 @@ def discover_similar_batches(
     if seed_strategy == "random":
         random.shuffle(candidate_seeds)
 
-    active_verifier = get_verifier(verifier_type)
+    verifier = DiffMaskVerifier()
     batches: list[dict[str, Any]] = []
     probes = 0
+
+    # Telemetry accumulators
+    t_recall_total = 0.0
+    t_io_total = 0.0
+    t_verify_total = 0.0
+    total_candidates_recalled = 0
+    total_images_loaded = 0
+    total_pairs_verified = 0
+
+    # Local session image cache (path -> PIL Image)
+    img_cache: dict[str, Image.Image] = {}
 
     for seed_idx in candidate_seeds:
         if seed_idx not in unvisited:
@@ -114,8 +134,13 @@ def discover_similar_batches(
             continue
 
         # Recall top neighbors from Faiss binary pHash index
-        recall_k = min(total_items, max(batch_size * 3, 15))
+        t_rec_0 = time.perf_counter()
+        recall_k = min(
+            total_items,
+            max(batch_size * settings.discover_recall_multiplier, settings.discover_min_recall_k),
+        )
         dists, ids = indexer.search_binary(seed_phash, k=recall_k, datasource=datasource)
+        t_recall_total += time.perf_counter() - t_rec_0
 
         candidate_ids: list[int] = []
         candidate_dists: dict[int, int] = {}
@@ -126,60 +151,77 @@ def discover_similar_batches(
                 candidate_ids.append(idx)
                 candidate_dists[idx] = int(d)
 
+        total_candidates_recalled += len(candidate_ids)
+
         if not candidate_ids:
             unvisited.discard(seed_idx)
             continue
 
-        # Load seed image
+        # Gather paths for parallel image loading
         seed_path = seed_meta.get("path", "")
-        seed_img: Image.Image | None = None
-        seed_fname = seed_meta.get("filename", "")
-        if images_map and seed_fname in images_map:
-            seed_img = images_map[seed_fname]
-        elif seed_path and Path(seed_path).exists():
-            seed_img = load_image(seed_path)
+        cand_metas: dict[int, dict] = {}
+        paths_to_load: list[str] = []
+
+        if seed_path and seed_path not in img_cache and Path(seed_path).exists():
+            paths_to_load.append(seed_path)
+
+        for cand_idx in candidate_ids:
+            c_meta = indexer.get_metadata(cand_idx, datasource=datasource)
+            if c_meta:
+                cand_metas[cand_idx] = c_meta
+                c_path = c_meta.get("path", "")
+                if c_path and c_path not in img_cache and Path(c_path).exists():
+                    paths_to_load.append(c_path)
+
+        # Batch load missing images in parallel
+        if paths_to_load:
+            t_io_0 = time.perf_counter()
+            loaded_imgs, ok_paths, _ = load_images(paths_to_load)
+            for p, img in zip(ok_paths, loaded_imgs):
+                img_cache[p] = img
+            total_images_loaded += len(ok_paths)
+            t_io_total += time.perf_counter() - t_io_0
+
+        # Retrieve seed image from cache
+        seed_img = img_cache.get(seed_path)
+        if seed_img is None:
+            logger.warning(
+                "Seed texture %s (%s) not found on disk, skipping probe", seed_idx, seed_path
+            )
+            unvisited.discard(seed_idx)
+            continue
 
         matching_members: list[dict[str, Any]] = []
         for cand_idx in candidate_ids:
-            cand_meta = indexer.get_metadata(cand_idx, datasource=datasource)
+            cand_meta = cand_metas.get(cand_idx)
             if not cand_meta:
                 continue
 
-            cand_fname = cand_meta.get("filename", "")
             cand_path = cand_meta.get("path", "")
+            cand_img = img_cache.get(cand_path)
+            if cand_img is None:
+                logger.warning("Candidate %s (%s) not found on disk, skipping", cand_idx, cand_path)
+                continue
+
+            cand_fname = cand_meta.get("filename", "")
             cand_phash_dist = candidate_dists[cand_idx]
             cand_dhash = cand_meta.get("dhash", "")
             cand_dhash_dist = 999
             if seed_meta.get("dhash") and cand_dhash:
                 cand_dhash_dist = hamming_distance(seed_meta["dhash"], cand_dhash)
 
-            cand_img: Image.Image | None = None
-            if images_map and cand_fname in images_map:
-                cand_img = images_map[cand_fname]
-            elif cand_path and Path(cand_path).exists():
-                cand_img = load_image(cand_path)
+            # Strict pixel-level verification via DiffMaskVerifier (NO shortcuts)
+            t_ver_0 = time.perf_counter()
+            v_res = verifier.verify(seed_img, cand_img)
+            t_verify_total += time.perf_counter() - t_ver_0
+            total_pairs_verified += 1
 
-            # Verification execution
-            if seed_img is not None and cand_img is not None:
-                v_res = active_verifier.verify(seed_img, cand_img)
-            elif seed_img is not None and cand_path:
-                v_res = active_verifier.verify_path(seed_img, cand_path)
-            else:
-                # Deterministic fallback when image files are not available on disk
-                is_pass = cand_phash_dist <= (2 if mode == "confirmed" else 4)
-                score = round(max(0.0, 1.0 - cand_phash_dist / 64.0), 4)
-                v_res = VerifyResult(
-                    passed=is_pass,
-                    score=score,
-                    diff_ratio=round(cand_phash_dist / 64.0, 4),
-                )
-
-            # Match level calibration
+            # Match criteria strictly respect DiffMask diff_ratio threshold
             if mode == "confirmed":
                 is_match = v_res.passed or v_res.diff_ratio <= max_diff_ratio
                 m_level = "confirmed" if is_match else "none"
-            else:
-                is_match = v_res.diff_ratio <= max_diff_ratio or cand_phash_dist <= 2
+            else:  # variants mode
+                is_match = v_res.diff_ratio <= max_diff_ratio
                 m_level = "suspected" if is_match else "none"
 
             if is_match:
@@ -205,7 +247,7 @@ def discover_similar_batches(
 
             seed_item = {
                 "id": seed_idx,
-                "filename": seed_fname,
+                "filename": seed_meta.get("filename", ""),
                 "datasource": datasource,
                 "dhash_distance": 0,
                 "phash_distance": 0,
@@ -235,6 +277,24 @@ def discover_similar_batches(
             unvisited.discard(seed_idx)
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 3)
+    stages = {
+        "recall": {
+            "probes_evaluated": probes,
+            "candidates_recalled": total_candidates_recalled,
+            "elapsed_ms": round(t_recall_total * 1000, 3),
+        },
+        "io_load": {
+            "images_loaded": total_images_loaded,
+            "elapsed_ms": round(t_io_total * 1000, 3),
+        },
+        "verify": {
+            "verifier": "DiffMaskVerifier",
+            "pairs_verified": total_pairs_verified,
+            "batches_formed": len(batches),
+            "elapsed_ms": round(t_verify_total * 1000, 3),
+        },
+    }
+
     logger.info(
         "Discovered %d %s batches in %.2fms (probes=%d, remaining_unvisited=%d)",
         len(batches),
@@ -251,4 +311,5 @@ def discover_similar_batches(
         "query_time_ms": elapsed_ms,
         "datasource": datasource,
         "mode": mode,
+        "stages": stages,
     }

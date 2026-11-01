@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     ssim_size: int = 128  # resize dimension for SSIM comparison (128 = fast, 256 = precise)
     ssim_device: str = "auto"  # 'auto' | 'cuda' | 'cpu'
 
+    # --- Seedless Discovery ---
+    discover_confirmed_hamming: int = 4  # max pHash Hamming distance for confirmed mode
+    discover_confirmed_diff_ratio: float = 0.05  # max DiffMask ratio for confirmed duplicates
+    discover_variants_hamming: int = 12  # max pHash Hamming distance for variants mode
+    discover_variants_diff_ratio: float = 0.35  # max DiffMask ratio for variant clusters
+    discover_recall_multiplier: int = 3  # multiplier for batch_size to determine recall_k
+    discover_min_recall_k: int = 15  # minimum recall_k for binary search
+
     # --- Auto-save ---
     auto_save_interval: int = 120  # seconds between periodic saves; 0 = disable (was 300)
 
@@ -149,7 +157,6 @@ class Settings(BaseSettings):
             self._metadata_path_for(t, datasource)
             for t in ("flat", "ivf_flat", "ivf_pq", "hnsw")
         ]
-
 
 
 # Module-level singleton — import this everywhere
