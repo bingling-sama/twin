@@ -7,11 +7,12 @@ Core Algorithm: Greedy Leader Dynamic Elimination
 1. Maintains an unvisited pool of indexed asset IDs.
 2. Selects pivot seed (supports random or sequential strategy).
 3. Recalls nearest neighbors via Faiss binary perceptual hash index (IndexBinaryFlat).
-4. Loads images in parallel via load_images() with local cache.
+4. Loads images in parallel via load_images() with deduplicated paths and local cache.
 5. Verifies candidate similarity against seed using DiffMaskVerifier.
 6. If cluster size >= 2 (seed + >= 1 verified neighbors):
    - Constructs a SimilarBatchItem.
    - Eliminates all cluster members from unvisited pool (prevents transitivity collapse).
+   - Immediately breaks if max_batches is satisfied (prevents probe inflation).
 7. Repeats until requested max_batches reached or unvisited pool / max_probes exhausted.
 8. Returns batches with detailed stage-level telemetry metrics (Show your work).
 """
@@ -173,8 +174,9 @@ def discover_similar_batches(
                 if c_path and c_path not in img_cache and Path(c_path).exists():
                     paths_to_load.append(c_path)
 
-        # Batch load missing images in parallel
+        # Batch load missing images in parallel with deduplication
         if paths_to_load:
+            paths_to_load = list(dict.fromkeys(paths_to_load))
             t_io_0 = time.perf_counter()
             loaded_imgs, ok_paths, _ = load_images(paths_to_load)
             for p, img in zip(ok_paths, loaded_imgs):
@@ -216,12 +218,11 @@ def discover_similar_batches(
             t_verify_total += time.perf_counter() - t_ver_0
             total_pairs_verified += 1
 
-            # Match criteria strictly respect DiffMask diff_ratio threshold
+            # Match criteria strictly respect configured max_diff_ratio (NO bypass via v_res.passed)
+            is_match = v_res.diff_ratio <= max_diff_ratio
             if mode == "confirmed":
-                is_match = v_res.passed or v_res.diff_ratio <= max_diff_ratio
                 m_level = "confirmed" if is_match else "none"
             else:  # variants mode
-                is_match = v_res.diff_ratio <= max_diff_ratio
                 m_level = "suspected" if is_match else "none"
 
             if is_match:
@@ -273,6 +274,10 @@ def discover_similar_batches(
             unvisited.discard(seed_idx)
             for m in matching_members:
                 unvisited.discard(m["id"])
+
+            # Immediate exit when target max_batches reached to prevent probe inflation
+            if len(batches) >= max_batches:
+                break
         else:
             unvisited.discard(seed_idx)
 

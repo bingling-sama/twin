@@ -126,7 +126,7 @@ def test_discover_identical_duplicates(tmp_path, sample_skins):
 
 
 def test_discover_variants_mode(tmp_path):
-    """Variants mode should detect edits/recolors with match_level='suspected'."""
+    """Variants mode should detect edits/recolors and exit immediately without probe inflation."""
     # Base structured skin
     arr_base = np.zeros((64, 64, 4), dtype=np.uint8)
     arr_base[8:16, 8:24] = [200, 100, 50, 255]
@@ -145,12 +145,16 @@ def test_discover_variants_mode(tmp_path):
 
     res = discover_similar_batches(
         datasource="skin",
-        max_batches=5,
+        max_batches=1,
         batch_size=5,
         mode="variants",
     )
 
     assert res["count"] == 1
+    # Verify no probe inflation: exactly 1 probe evaluated to yield max_batches=1
+    assert res["total_probes"] == 1
+    assert res["stages"]["recall"]["probes_evaluated"] == 1
+
     batch = res["batches"][0]
     assert batch["size"] == 2
     assert batch["mode"] == "variants"
@@ -210,6 +214,56 @@ def test_discover_elimination_guarantee(tmp_path):
     assert batch["size"] == 3
     all_members = [batch["seed"]["filename"]] + [m["filename"] for m in batch["members"]]
     assert set(all_members) == {"c1.png", "c2.png", "c3.png"}
+
+
+def test_discover_cape_datasource(tmp_path):
+    """Verify multi-datasource isolation: cape queries only discover within cape partition."""
+    # Cape textures (standard 64x32 layout)
+    arr_cape = np.zeros((32, 64, 4), dtype=np.uint8)
+    arr_cape[:17, :22] = [200, 30, 30, 255]
+    arr_cape[:, :, 3] = 255
+    cape1 = Image.fromarray(arr_cape, mode="RGBA")
+    cape2 = Image.fromarray(arr_cape.copy(), mode="RGBA")
+
+    # Skin textures (64x64)
+    arr_skin = np.zeros((64, 64, 4), dtype=np.uint8)
+    arr_skin[8:16, 8:24] = [30, 200, 30, 255]
+    arr_skin[:, :, 3] = 255
+    skin1 = Image.fromarray(arr_skin, mode="RGBA")
+    skin2 = Image.fromarray(arr_skin.copy(), mode="RGBA")
+
+    _index_skin(cape1, "cape1.png", tmp_path, datasource="cape")
+    _index_skin(cape2, "cape2.png", tmp_path, datasource="cape")
+    _index_skin(skin1, "skin1.png", tmp_path, datasource="skin")
+    _index_skin(skin2, "skin2.png", tmp_path, datasource="skin")
+
+    # Run discovery on 'cape'
+    res_cape = discover_similar_batches(
+        datasource="cape",
+        max_batches=5,
+        mode="confirmed",
+    )
+
+    assert res_cape["count"] == 1
+    assert res_cape["datasource"] == "cape"
+    batch_cape = res_cape["batches"][0]
+    assert batch_cape["datasource"] == "cape"
+    assert batch_cape["seed"]["datasource"] == "cape"
+    assert batch_cape["members"][0]["datasource"] == "cape"
+    cape_fnames = {batch_cape["seed"]["filename"], batch_cape["members"][0]["filename"]}
+    assert cape_fnames == {"cape1.png", "cape2.png"}
+
+    # Run discovery on 'skin'
+    res_skin = discover_similar_batches(
+        datasource="skin",
+        max_batches=5,
+        mode="confirmed",
+    )
+    assert res_skin["count"] == 1
+    assert res_skin["datasource"] == "skin"
+    batch_skin = res_skin["batches"][0]
+    skin_fnames = {batch_skin["seed"]["filename"], batch_skin["members"][0]["filename"]}
+    assert skin_fnames == {"skin1.png", "skin2.png"}
 
 
 def test_discover_batches_api_endpoint(tmp_path, sample_skins):

@@ -528,6 +528,12 @@ GET /api/v1/discover/batches (Seedless discovery)
 | `TWIN_SYNC_ON_STARTUP` | `false` | Block startup until sync done |
 | `TWIN_INDEX_PATH` | `data` | Index storage dir |
 | `TWIN_IMAGES_DIR` | `data/images` | Source images dir |
+| `TWIN_DISCOVER_CONFIRMED_HAMMING` | `4` | Max pHash Hamming distance for confirmed mode |
+| `TWIN_DISCOVER_CONFIRMED_DIFF_RATIO` | `0.05` | Max DiffMask mismatch ratio for confirmed duplicates |
+| `TWIN_DISCOVER_VARIANTS_HAMMING` | `12` | Max pHash Hamming distance for variants mode |
+| `TWIN_DISCOVER_VARIANTS_DIFF_RATIO` | `0.35` | Max DiffMask mismatch ratio for variant clusters |
+| `TWIN_DISCOVER_RECALL_MULTIPLIER` | `3` | Candidate recall multiplier (`k = batch_size * multiplier`) |
+| `TWIN_DISCOVER_MIN_RECALL_K` | `15` | Minimum binary candidate recall count |
 
 ### Critical Gotcha: OpenMP on macOS & Windows
 
