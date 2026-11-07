@@ -17,6 +17,7 @@ from twin.api.schemas import (
     BatchIndexResponse,
     ConfigResponse,
     ConfigUpdateRequest,
+    DiscoverResponse,
     ErrorResponse,
     HealthResponse,
     IndexListResponse,
@@ -27,6 +28,7 @@ from twin.api.schemas import (
     TextSearchResponse,
 )
 from twin.core.config import settings
+from twin.services.cluster import discover_similar_batches
 from twin.services.embedding import (
     get_device,
     get_gpu_name,
@@ -456,3 +458,42 @@ def serve_image(filename: str):
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(file_path)
+
+
+# ---------------------------------------------------------------------------
+# Seedless Discovery
+# ---------------------------------------------------------------------------
+@router.get(
+    "/discover/batches",
+    response_model=DiscoverResponse,
+    summary="Discover batches of similar textures without an input seed",
+    tags=["Discovery"],
+)
+def get_discovered_batches(
+    datasource: str = Query(
+        default="skin", description="Target datasource ('skin' or 'cape')", pattern="^(skin|cape)$"
+    ),
+    max_batches: int = Query(default=5, ge=1, le=50, description="Max batches to return"),
+    batch_size: int = Query(default=5, ge=2, le=20, description="Max cluster size per batch"),
+    mode: str = Query(
+        default="confirmed",
+        description="Discovery mode ('confirmed' for duplicates, 'variants' for recolors/edits)",
+        pattern="^(confirmed|variants)$",
+    ),
+    max_probes: int = Query(default=200, ge=10, le=1000, description="Max exploration attempts"),
+    seed_strategy: str = Query(
+        default="random",
+        description="Seed selection strategy ('random' or 'sequential')",
+        pattern="^(random|sequential)$",
+    ),
+) -> DiscoverResponse:
+    """Discover batches of mutually similar or duplicate textures in the index."""
+    res = discover_similar_batches(
+        datasource=datasource,
+        max_batches=max_batches,
+        batch_size=batch_size,
+        mode=mode,
+        max_probes=max_probes,
+        seed_strategy=seed_strategy,
+    )
+    return DiscoverResponse(**res)
