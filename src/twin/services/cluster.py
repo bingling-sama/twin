@@ -6,7 +6,8 @@ indexed assets without requiring an input query image.
 Core Algorithm: Greedy Leader Dynamic Elimination
 1. Maintains an unvisited pool of indexed asset IDs.
 2. Selects pivot seed (supports random or sequential strategy).
-3. Recalls nearest neighbors via Faiss binary perceptual hash index (IndexBinaryFlat).
+3. Recalls nearest neighbors via Faiss binary perceptual hash index (IndexBinaryFlat)
+   with adaptive expansion to prevent recall starvation from eliminated nodes.
 4. Loads images in parallel via load_images() with deduplicated paths and local cache.
 5. Verifies candidate similarity against seed using DiffMaskVerifier.
 6. If cluster size >= 2 (seed + >= 1 verified neighbors):
@@ -23,7 +24,7 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PIL import Image
 
@@ -35,14 +36,37 @@ from twin.utils.image import load_images
 
 logger = logging.getLogger(__name__)
 
+DiscoveryMode = Literal["confirmed", "variants"]
+SeedStrategy = Literal["random", "sequential"]
+
+
+def _build_discover_response(
+    batches: list[dict[str, Any]],
+    probes: int,
+    elapsed_ms: float,
+    datasource: str,
+    mode: str,
+    stages: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a uniform discovery response dictionary."""
+    return {
+        "batches": batches,
+        "count": len(batches),
+        "total_probes": probes,
+        "query_time_ms": elapsed_ms,
+        "datasource": datasource,
+        "mode": mode,
+        "stages": stages,
+    }
+
 
 def discover_similar_batches(
     datasource: str = "skin",
     max_batches: int = 5,
     batch_size: int = 5,
-    mode: str = "confirmed",  # "confirmed" | "variants"
+    mode: DiscoveryMode = "confirmed",
     max_probes: int = 200,
-    seed_strategy: str = "random",  # "random" | "sequential"
+    seed_strategy: SeedStrategy = "random",
 ) -> dict[str, Any]:
     """Discover batches of similar textures without an input seed image.
 
@@ -58,6 +82,15 @@ def discover_similar_batches(
         Dictionary containing discovered batches, count, probes, performance metrics,
         and stage-level telemetry.
     """
+    if mode not in ("confirmed", "variants"):
+        raise ValueError(
+            f"Unsupported discovery mode: '{mode}'. Must be 'confirmed' or 'variants'."
+        )
+    if seed_strategy not in ("random", "sequential"):
+        raise ValueError(
+            f"Unsupported seed strategy: '{seed_strategy}'. Must be 'random' or 'sequential'."
+        )
+
     t0 = time.perf_counter()
     total_items = indexer.get_count(datasource=datasource)
 
@@ -74,15 +107,14 @@ def discover_similar_batches(
 
     if total_items < 2:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 3)
-        return {
-            "batches": [],
-            "count": 0,
-            "total_probes": 0,
-            "query_time_ms": elapsed_ms,
-            "datasource": datasource,
-            "mode": mode,
-            "stages": empty_stages,
-        }
+        return _build_discover_response(
+            batches=[],
+            probes=0,
+            elapsed_ms=elapsed_ms,
+            datasource=datasource,
+            mode=mode,
+            stages=empty_stages,
+        )
 
     # Threshold calibration based on mode (from centralized settings)
     if mode == "confirmed":
@@ -115,14 +147,17 @@ def discover_similar_batches(
 
     # Local session image cache (path -> PIL Image)
     img_cache: dict[str, Image.Image] = {}
+    target_candidates = batch_size - 1
 
     for seed_idx in candidate_seeds:
         if seed_idx not in unvisited:
             continue
 
-        probes += 1
-        if probes > max_probes or len(batches) >= max_batches:
+        # Check quota before incrementing probe counter (P2 bugfix)
+        if probes >= max_probes or len(batches) >= max_batches:
             break
+
+        probes += 1
 
         seed_meta = indexer.get_metadata(seed_idx, datasource=datasource)
         if not seed_meta:
@@ -134,23 +169,46 @@ def discover_similar_batches(
             unvisited.discard(seed_idx)
             continue
 
-        # Recall top neighbors from Faiss binary pHash index
-        t_rec_0 = time.perf_counter()
-        recall_k = min(
+        # Adaptive recall expansion: expand k until enough unvisited candidates are found
+        # or the search distance exceeds max_hamming / reaches total_items (P1 bugfix)
+        curr_k = min(
             total_items,
             max(batch_size * settings.discover_recall_multiplier, settings.discover_min_recall_k),
         )
-        dists, ids = indexer.search_binary(seed_phash, k=recall_k, datasource=datasource)
-        t_recall_total += time.perf_counter() - t_rec_0
-
         candidate_ids: list[int] = []
         candidate_dists: dict[int, int] = {}
-        for d, idx in zip(dists, ids):
-            if idx == seed_idx or idx not in unvisited or idx < 0:
-                continue
-            if d <= max_hamming:
-                candidate_ids.append(idx)
-                candidate_dists[idx] = int(d)
+
+        while True:
+            t_rec_0 = time.perf_counter()
+            dists, ids = indexer.search_binary(seed_phash, k=curr_k, datasource=datasource)
+            t_recall_total += time.perf_counter() - t_rec_0
+
+            candidate_ids.clear()
+            candidate_dists.clear()
+            max_recalled_dist = 0
+
+            for d, idx in zip(dists, ids):
+                if idx < 0:
+                    continue
+                d_val = int(d)
+                max_recalled_dist = max(max_recalled_dist, d_val)
+                if idx == seed_idx or idx not in unvisited:
+                    continue
+                if d_val <= max_hamming:
+                    candidate_ids.append(idx)
+                    candidate_dists[idx] = d_val
+
+            # Stop expansion if we have sufficient candidates, or searched all items,
+            # or the monotonic Hamming distance strictly exceeds threshold.
+            if (
+                len(candidate_ids) >= target_candidates
+                or curr_k >= total_items
+                or max_recalled_dist > max_hamming
+            ):
+                break
+
+            # Exponentially expand recall window to bypass eliminated ghost items
+            curr_k = min(total_items, max(curr_k * 2, curr_k + 16))
 
         total_candidates_recalled += len(candidate_ids)
 
@@ -214,16 +272,13 @@ def discover_similar_batches(
 
             # Strict pixel-level verification via DiffMaskVerifier (NO shortcuts)
             t_ver_0 = time.perf_counter()
-            v_res = verifier.verify(seed_img, cand_img)
+            verification = verifier.verify(seed_img, cand_img)
             t_verify_total += time.perf_counter() - t_ver_0
             total_pairs_verified += 1
 
-            # Match criteria strictly respect configured max_diff_ratio (NO bypass via v_res.passed)
-            is_match = v_res.diff_ratio <= max_diff_ratio
-            if mode == "confirmed":
-                m_level = "confirmed" if is_match else "none"
-            else:  # variants mode
-                m_level = "suspected" if is_match else "none"
+            # Match criteria strictly respect configured max_diff_ratio (NO bypass)
+            is_match = verification.diff_ratio <= max_diff_ratio
+            match_level = target_match_level if is_match else "none"
 
             if is_match:
                 matching_members.append(
@@ -233,9 +288,9 @@ def discover_similar_batches(
                         "datasource": datasource,
                         "dhash_distance": cand_dhash_dist,
                         "phash_distance": cand_phash_dist,
-                        "verifier_score": round(float(v_res.score), 4),
-                        "diff_ratio": round(float(v_res.diff_ratio), 4),
-                        "match_level": m_level,
+                        "verifier_score": round(float(verification.score), 4),
+                        "diff_ratio": round(float(verification.diff_ratio), 4),
+                        "match_level": match_level,
                         "path": cand_path,
                     }
                 )
@@ -309,12 +364,11 @@ def discover_similar_batches(
         len(unvisited),
     )
 
-    return {
-        "batches": batches,
-        "count": len(batches),
-        "total_probes": probes,
-        "query_time_ms": elapsed_ms,
-        "datasource": datasource,
-        "mode": mode,
-        "stages": stages,
-    }
+    return _build_discover_response(
+        batches=batches,
+        probes=probes,
+        elapsed_ms=elapsed_ms,
+        datasource=datasource,
+        mode=mode,
+        stages=stages,
+    )

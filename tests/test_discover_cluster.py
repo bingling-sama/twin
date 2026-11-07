@@ -216,6 +216,110 @@ def test_discover_elimination_guarantee(tmp_path):
     assert set(all_members) == {"c1.png", "c2.png", "c3.png"}
 
 
+def test_discover_recall_starvation_large_duplicates(tmp_path):
+    """[P1 Bugfix Test] Large cluster (> initial recall_k) must not suffer recall starvation.
+
+    When 30 identical textures exist and batch_size=5, initial recall_k=15 will exhaust
+    fresh candidates after batch 3. Adaptive recall expansion must kick in to successfully
+    discover all 6 full batches (30 items total).
+    """
+    img = Image.new("RGBA", (64, 64), (120, 80, 200, 255))
+    total_imgs = 30
+    for i in range(total_imgs):
+        _index_skin(img, f"dup_{i:02d}.png", tmp_path)
+
+    res = discover_similar_batches(
+        datasource="skin",
+        max_batches=50,
+        batch_size=5,
+        mode="confirmed",
+        seed_strategy="sequential",
+        max_probes=200,
+    )
+
+    # 30 items divided by batch_size 5 = exactly 6 batches
+    assert res["count"] == 6
+    assert len(res["batches"]) == 6
+
+    discovered_files = set()
+    for batch in res["batches"]:
+        assert batch["size"] == 5
+        discovered_files.add(batch["seed"]["filename"])
+        for member in batch["members"]:
+            discovered_files.add(member["filename"])
+
+    # All 30 files must be discovered without dropping any into starvation
+    assert len(discovered_files) == total_imgs
+    expected_files = {f"dup_{i:02d}.png" for i in range(total_imgs)}
+    assert discovered_files == expected_files
+
+
+def test_discover_probes_budget_exhaustion(tmp_path):
+    """[P2 Bugfix Test] Probes counter must strictly equal max_probes when budget exhausts.
+
+    When max_probes is reached, the probe count and telemetry must NOT report max_probes + 1.
+    """
+    # Index 20 distinct textures with no duplicate peers
+    for i in range(20):
+        arr = np.full((64, 64, 4), i * 10, dtype=np.uint8)
+        arr[:, :, 3] = 255
+        img = Image.fromarray(arr, mode="RGBA")
+        _index_skin(img, f"solo_{i:02d}.png", tmp_path)
+
+    res = discover_similar_batches(
+        datasource="skin",
+        max_batches=50,
+        batch_size=5,
+        mode="confirmed",
+        seed_strategy="sequential",
+        max_probes=10,
+    )
+
+    # Exactly 10 probes evaluated, NO phantom 11th probe recorded
+    assert res["total_probes"] == 10
+    assert res["stages"]["recall"]["probes_evaluated"] == 10
+    assert res["count"] == 0
+
+
+def test_discover_transitivity_collapse_prevention(tmp_path):
+    """[Spec Anti-Collapse Test] Star topology must prevent transitive small-world avalanche.
+
+    Given A ≈ B (diff 0.20), B ≈ C (diff 0.31), but A ≉ C (diff 0.52):
+    Traditional union-find / graph clustering causes transitivity collapse {A, B, C}.
+    Greedy leader elimination forms {A, B}, eliminates {A, B}, and isolates C cleanly.
+    """
+    arr_a = np.zeros((64, 64, 4), dtype=np.uint8)
+    arr_a[:, :, :3] = [100, 150, 200]
+    arr_a[:, :, 3] = 255
+
+    # B has 20% diff from A
+    arr_b = arr_a.copy()
+    arr_b[:13, :, :3] = [200, 80, 50]
+
+    # C has 51.5% diff from A, but 31.25% diff from B
+    arr_c = arr_a.copy()
+    arr_c[:33, :, :3] = [200, 80, 50]
+
+    _index_skin(Image.fromarray(arr_a, mode="RGBA"), "skin_a.png", tmp_path)
+    _index_skin(Image.fromarray(arr_b, mode="RGBA"), "skin_b.png", tmp_path)
+    _index_skin(Image.fromarray(arr_c, mode="RGBA"), "skin_c.png", tmp_path)
+
+    res = discover_similar_batches(
+        datasource="skin",
+        max_batches=10,
+        batch_size=5,
+        mode="variants",
+        seed_strategy="sequential",
+    )
+
+    # Only 1 cluster formed: {skin_a, skin_b}. skin_c must NEVER be dragged in!
+    assert res["count"] == 1
+    batch = res["batches"][0]
+    cluster_members = {batch["seed"]["filename"]} | {m["filename"] for m in batch["members"]}
+    assert cluster_members == {"skin_a.png", "skin_b.png"}
+    assert "skin_c.png" not in cluster_members
+
+
 def test_discover_cape_datasource(tmp_path):
     """Verify multi-datasource isolation: cape queries only discover within cape partition."""
     # Cape textures (standard 64x32 layout)
