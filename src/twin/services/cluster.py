@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from PIL import Image
 
+from twin.api.schemas import DiscoveryMode
 from twin.core.config import settings
 from twin.services.hasher import hamming_distance
 from twin.services.indexer import indexer
@@ -36,7 +37,6 @@ from twin.utils.image import load_images
 
 logger = logging.getLogger(__name__)
 
-DiscoveryMode = Literal["confirmed", "variants"]
 SeedStrategy = Literal["random", "sequential"]
 
 

@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from pydantic import ValidationError
 
+from twin.api.schemas import (
+    DiscoveredMemberItem,
+    DiscoverResponse,
+    DiscoverStages,
+    SimilarBatchItem,
+)
 from twin.main import app
 from twin.services.cluster import discover_similar_batches
 from twin.services.hasher import compute_ahash, compute_dhash, compute_phash
@@ -389,3 +396,216 @@ def test_discover_batches_api_endpoint(tmp_path, sample_skins):
     assert data["datasource"] == "skin"
     assert data["mode"] == "confirmed"
     assert data["count"] <= 2
+
+
+def test_discover_adaptive_recall_with_eliminated_holes(tmp_path):
+    """Verify adaptive recall penetrates interleaved clusters with eliminated holes.
+
+    Constructs two distinct duplicate clusters (Skin A and Skin B) interleaved in the index.
+    After the first 2 batches consume and eliminate 10 items (5 of A, 5 of B), the remaining
+    10 items of Skin A reside behind these eliminated nodes.
+    The adaptive recall must expand its search window to bypass eliminated holes and
+    successfully discover all remaining clusters with zero omissions.
+    """
+    arr_a = np.zeros((64, 64, 4), dtype=np.uint8)
+    arr_a[8:16, 8:24] = [200, 100, 50, 255]
+    arr_a[:, :, 3] = 255
+    img_a = Image.fromarray(arr_a, mode="RGBA")
+
+    arr_b = np.zeros((64, 64, 4), dtype=np.uint8)
+    arr_b[20:32, 20:36] = [50, 200, 100, 255]
+    arr_b[:, :, 3] = 255
+    img_b = Image.fromarray(arr_b, mode="RGBA")
+
+    # Interleaved index layout: A1 (5) -> B (5) -> A2 (10)
+    for i in range(5):
+        _index_skin(img_a, f"cluster_a1_{i:02d}.png", tmp_path)
+    for i in range(5):
+        _index_skin(img_b, f"cluster_b_{i:02d}.png", tmp_path)
+    for i in range(10):
+        _index_skin(img_a, f"cluster_a2_{i:02d}.png", tmp_path)
+
+    res = discover_similar_batches(
+        datasource="skin",
+        max_batches=10,
+        batch_size=5,
+        mode="confirmed",
+        seed_strategy="sequential",
+    )
+    # Expected: 3 batches of A (15 items) and 1 batch of B (5 items) = 4 batches total
+    assert res["count"] == 4
+    discovered_fnames = set()
+    for batch in res["batches"]:
+        assert batch["size"] == 5
+        discovered_fnames.add(batch["seed"]["filename"])
+        for member in batch["members"]:
+            discovered_fnames.add(member["filename"])
+
+    assert len(discovered_fnames) == 20
+    assert res["stages"]["recall"]["candidates_recalled"] >= 20
+
+
+def test_discover_hamming_boundary_and_ties(tmp_path):
+    """Verify Hamming threshold boundaries, tied distances, and K-window scaling.
+
+    - Candidates with distance <= threshold (including exact boundary) are evaluated.
+    - Multiple candidates with tied distances are deterministically handled.
+    - Candidates exceeding the Hamming threshold (dist=8 > 4) are strictly pruned out.
+    - Verifies execution across a non-trivial dataset (> discover_min_recall_k = 15).
+    """
+    base = np.zeros((64, 64, 4), dtype=np.uint8)
+    base[8:16, 8:24] = [200, 100, 50, 255]
+    base[20:32, 20:36] = [50, 100, 200, 255]
+    base[:, :, 3] = 255
+    base_img = Image.fromarray(base, mode="RGBA")
+    _index_skin(base_img, "seed_base.png", tmp_path)
+
+    # 1. Tied candidates at Hamming distance 2
+    cand_dist2_a = base.copy()
+    cand_dist2_a[40:41, 40:41] = [255, 255, 255, 255]
+    _index_skin(Image.fromarray(cand_dist2_a, mode="RGBA"), "cand_dist2_a.png", tmp_path)
+
+    cand_dist2_b = base.copy()
+    cand_dist2_b[40:42, 40:42] = [255, 255, 255, 255]
+    _index_skin(Image.fromarray(cand_dist2_b, mode="RGBA"), "cand_dist2_b.png", tmp_path)
+
+    # 2. Tied candidates at exact confirmed boundary (Hamming distance 4)
+    cand_dist4_a = base.copy()
+    cand_dist4_a[40:43, 40:43] = [255, 255, 255, 255]
+    _index_skin(Image.fromarray(cand_dist4_a, mode="RGBA"), "cand_dist4_a.png", tmp_path)
+
+    cand_dist4_b = base.copy()
+    cand_dist4_b[40:44, 40:44] = [255, 255, 255, 255]
+    _index_skin(Image.fromarray(cand_dist4_b, mode="RGBA"), "cand_dist4_b.png", tmp_path)
+
+    # 3. Candidate strictly exceeding confirmed boundary (Hamming distance 8 > 4)
+    cand_dist8_out = base.copy()
+    cand_dist8_out[40:45, 40:45] = [255, 255, 255, 255]
+    _index_skin(Image.fromarray(cand_dist8_out, mode="RGBA"), "cand_dist8_out.png", tmp_path)
+
+    # 4. Add 15 filler noise images so total_items = 21 > discover_min_recall_k = 15
+    for i in range(15):
+        noise = np.full((64, 64, 4), 10 + i * 10, dtype=np.uint8)
+        noise[:, :, 3] = 255
+        _index_skin(Image.fromarray(noise, mode="RGBA"), f"noise_{i:02d}.png", tmp_path)
+
+    res = discover_similar_batches(
+        datasource="skin",
+        max_batches=1,
+        batch_size=5,
+        mode="confirmed",
+        seed_strategy="sequential",
+    )
+    assert res["count"] == 1
+    batch = res["batches"][0]
+    members = {batch["seed"]["filename"]} | {m["filename"] for m in batch["members"]}
+
+    # Boundary and tied candidates must be included
+    assert "cand_dist2_a.png" in members
+    assert "cand_dist2_b.png" in members
+    assert "cand_dist4_a.png" in members
+    assert "cand_dist4_b.png" in members
+    # Exceeded candidate and noise skins must be pruned
+    assert "cand_dist8_out.png" not in members
+    for i in range(15):
+        assert f"noise_{i:02d}.png" not in members
+
+
+def test_discover_batches_api_minimal_probes(tmp_path, sample_skins):
+    """API must accept max_probes=1 for minimal budget and reject max_probes=0."""
+    for fname, img in sample_skins.items():
+        _index_skin(img, fname, tmp_path)
+
+    client = TestClient(app)
+
+    # Valid: max_probes=1 (ge=1)
+    res_valid = client.get("/api/v1/discover/batches?datasource=skin&max_probes=1")
+    assert res_valid.status_code == 200
+    data = res_valid.json()
+    assert data["total_probes"] == 1
+    assert data["stages"]["recall"]["probes_evaluated"] == 1
+
+    # Invalid: max_probes=0 (violates ge=1)
+    res_invalid = client.get("/api/v1/discover/batches?datasource=skin&max_probes=0")
+    assert res_invalid.status_code == 422
+
+
+def test_discover_response_schema_validation():
+    """Verify strong typing and validation guards of discovery Pydantic models."""
+    member = DiscoveredMemberItem(
+        id=1,
+        filename="skin_1.png",
+        datasource="skin",
+        match_level="confirmed",
+    )
+    assert member.datasource == "skin"
+    assert member.match_level == "confirmed"
+
+    batch = SimilarBatchItem(
+        batch_id=1,
+        size=2,
+        mode="confirmed",
+        datasource="skin",
+        seed=member,
+        members=[member],
+    )
+    assert batch.mode == "confirmed"
+
+    response = DiscoverResponse(
+        batches=[batch],
+        count=1,
+        total_probes=1,
+        query_time_ms=2.5,
+        datasource="skin",
+        mode="confirmed",
+        stages={
+            "recall": {"probes_evaluated": 1, "candidates_recalled": 5, "elapsed_ms": 0.8},
+            "io_load": {"images_loaded": 2, "elapsed_ms": 0.4},
+            "verify": {
+                "verifier": "DiffMaskVerifier",
+                "pairs_verified": 1,
+                "batches_formed": 1,
+                "elapsed_ms": 1.3,
+            },
+        },
+    )
+    assert isinstance(response.stages, DiscoverStages)
+    assert response.stages.recall.probes_evaluated == 1
+    assert response.stages.verify.verifier == "DiffMaskVerifier"
+
+    # Strict Literal domain validation
+    with pytest.raises(ValidationError):
+        DiscoveredMemberItem(id=1, filename="x.png", datasource="invalid_source")
+
+    with pytest.raises(ValidationError):
+        SimilarBatchItem(batch_id=1, size=1, mode="invalid_mode", seed=member, members=[])
+
+    with pytest.raises(ValidationError):
+        DiscoveredMemberItem(id=1, filename="x.png", match_level="unknown_level")
+
+    # Nested stages validation guards
+    with pytest.raises(ValidationError):
+        DiscoverResponse(
+            batches=[],
+            count=0,
+            total_probes=0,
+            query_time_ms=0.0,
+            datasource="skin",
+            mode="confirmed",
+            stages={
+                "verify": {"verifier": "UnknownVerifier"},
+            },
+        )
+
+    with pytest.raises(ValidationError):
+        DiscoverResponse(
+            batches=[],
+            count=0,
+            total_probes=0,
+            query_time_ms=0.0,
+            datasource="skin",
+            mode="confirmed",
+            stages={
+                "recall": {"probes_evaluated": "not_an_int"},
+            },
+        )

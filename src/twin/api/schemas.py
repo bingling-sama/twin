@@ -1,5 +1,7 @@
 """Pydantic request/response models."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -184,23 +186,53 @@ class ErrorResponse(BaseModel):
 
 
 # --- Seedless Discovery ---
+DatasourceType = Literal["skin", "cape"]
+DiscoveryMode = Literal["confirmed", "variants"]
+ClusterMatchLevel = Literal["confirmed", "suspected"]
+VerifierType = Literal["DiffMaskVerifier", "SSIMVerifier"]
+
+
+class DiscoverRecallStage(BaseModel):
+    probes_evaluated: int = 0
+    candidates_recalled: int = 0
+    elapsed_ms: float = 0.0
+
+
+class DiscoverIoStage(BaseModel):
+    images_loaded: int = 0
+    elapsed_ms: float = 0.0
+
+
+class DiscoverVerifyStage(BaseModel):
+    verifier: VerifierType = "DiffMaskVerifier"
+    pairs_verified: int = 0
+    batches_formed: int = 0
+    elapsed_ms: float = 0.0
+
+
+class DiscoverStages(BaseModel):
+    recall: DiscoverRecallStage = Field(default_factory=DiscoverRecallStage)
+    io_load: DiscoverIoStage = Field(default_factory=DiscoverIoStage)
+    verify: DiscoverVerifyStage = Field(default_factory=DiscoverVerifyStage)
+
+
 class DiscoveredMemberItem(BaseModel):
     id: int
     filename: str
-    datasource: str = "skin"
+    datasource: DatasourceType = "skin"
     dhash_distance: int = 0
     phash_distance: int = 0
     verifier_score: float = 0.0
     diff_ratio: float = 0.0
-    match_level: str = "confirmed"  # "confirmed" | "suspected"
+    match_level: ClusterMatchLevel = "confirmed"
     path: str = ""
 
 
 class SimilarBatchItem(BaseModel):
     batch_id: int
     size: int
-    mode: str = "confirmed"
-    datasource: str = "skin"
+    mode: DiscoveryMode = "confirmed"
+    datasource: DatasourceType = "skin"
     seed: DiscoveredMemberItem
     members: list[DiscoveredMemberItem]
     max_diff_ratio: float = 0.0
@@ -211,6 +243,6 @@ class DiscoverResponse(BaseModel):
     count: int
     total_probes: int
     query_time_ms: float
-    datasource: str = "skin"
-    mode: str = "confirmed"
-    stages: dict = Field(default_factory=dict)
+    datasource: DatasourceType = "skin"
+    mode: DiscoveryMode = "confirmed"
+    stages: DiscoverStages = Field(default_factory=DiscoverStages)

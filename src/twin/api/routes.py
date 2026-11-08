@@ -17,7 +17,9 @@ from twin.api.schemas import (
     BatchIndexResponse,
     ConfigResponse,
     ConfigUpdateRequest,
+    DatasourceType,
     DiscoverResponse,
+    DiscoveryMode,
     ErrorResponse,
     HealthResponse,
     IndexListResponse,
@@ -470,17 +472,16 @@ def serve_image(filename: str):
     tags=["Discovery"],
 )
 def get_discovered_batches(
-    datasource: str = Query(
-        default="skin", description="Target datasource ('skin' or 'cape')", pattern="^(skin|cape)$"
+    datasource: DatasourceType = Query(
+        default="skin", description="Target datasource ('skin' or 'cape')"
     ),
     max_batches: int = Query(default=5, ge=1, le=50, description="Max batches to return"),
     batch_size: int = Query(default=5, ge=2, le=20, description="Max cluster size per batch"),
-    mode: str = Query(
+    mode: DiscoveryMode = Query(
         default="confirmed",
         description="Discovery mode ('confirmed' for duplicates, 'variants' for recolors/edits)",
-        pattern="^(confirmed|variants)$",
     ),
-    max_probes: int = Query(default=200, ge=10, le=1000, description="Max exploration attempts"),
+    max_probes: int = Query(default=200, ge=1, le=1000, description="Max exploration attempts"),
     seed_strategy: str = Query(
         default="random",
         description="Seed selection strategy ('random' or 'sequential')",
