@@ -4,23 +4,68 @@ Calculates:
 - Execution efficiency (Throughput, Probes/sec, Pairs/sec, Stage latency breakdown)
 - Clustering quality (Cluster Purity, Perfect Batch Rate, Cluster Recall Rate)
 - Transitivity constraints (Max within-cluster DiffMask ratio)
+- Non-destructive state isolation (Strictly preserves host TWIN_INDEX_PATH data)
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import numpy as np
 
 from benchmarks.cluster.dataset import BenchmarkItem
 from twin.api.schemas import DiscoveryMode
+from twin.core.config import settings
 from twin.services.cluster import SeedStrategy, discover_similar_batches
 from twin.services.hasher import compute_ahash, compute_dhash, compute_phash
 from twin.services.indexer import indexer
+
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def isolated_index_environment(index_dir: Path | str | None = None) -> Generator[Path, None, None]:
+    """Isolate settings.index_path and TWIN_INDEX_PATH to a safe temporary sandbox.
+
+    Guarantees that indexer.clear() and index writing operations never touch
+    host or production index directories under data/.
+    """
+    original_index_path = settings.index_path
+    original_env = os.environ.get("TWIN_INDEX_PATH")
+
+    if index_dir is None:
+        temp_ctx = tempfile.TemporaryDirectory(prefix="twin_isolated_index_")
+        isolated_path = Path(temp_ctx.name)
+    else:
+        temp_ctx = None
+        isolated_path = Path(index_dir)
+
+    isolated_path.mkdir(parents=True, exist_ok=True)
+    settings.index_path = str(isolated_path)
+    os.environ["TWIN_INDEX_PATH"] = str(isolated_path)
+
+    try:
+        indexer.clear()
+        yield isolated_path
+    finally:
+        try:
+            indexer.clear()
+        except Exception as e:
+            logger.warning("Error clearing temporary sandbox index: %s", e)
+        settings.index_path = original_index_path
+        if original_env is not None:
+            os.environ["TWIN_INDEX_PATH"] = original_env
+        else:
+            os.environ.pop("TWIN_INDEX_PATH", None)
+        if temp_ctx is not None:
+            temp_ctx.cleanup()
 
 
 @dataclass
@@ -135,20 +180,24 @@ def evaluate_cluster_scenario(
     max_probes: int = 200,
     datasource: str = "skin",
 ) -> ScenarioResult:
-    """Run discovery on the benchmark items and evaluate metrics."""
+    """Run discovery on benchmark items in an isolated sandbox and evaluate metrics."""
     with tempfile.TemporaryDirectory(prefix="twin_cluster_bench_") as tmp_dir:
-        fn_to_cluster = populate_cluster_index(items, tmp_dir=tmp_dir, datasource=datasource)
+        img_dir = Path(tmp_dir) / "images"
+        idx_dir = Path(tmp_dir) / "index"
 
-        t0 = time.perf_counter()
-        res = discover_similar_batches(
-            datasource=datasource,
-            max_batches=max_batches,
-            batch_size=batch_size,
-            mode=mode,
-            max_probes=max_probes,
-            seed_strategy=seed_strategy,
-        )
-        elapsed_sec = max(time.perf_counter() - t0, 0.0001)
+        with isolated_index_environment(index_dir=idx_dir):
+            fn_to_cluster = populate_cluster_index(items, tmp_dir=img_dir, datasource=datasource)
+
+            t0 = time.perf_counter()
+            res = discover_similar_batches(
+                datasource=datasource,
+                max_batches=max_batches,
+                batch_size=batch_size,
+                mode=mode,
+                max_probes=max_probes,
+                seed_strategy=seed_strategy,
+            )
+            elapsed_sec = max(time.perf_counter() - t0, 0.0001)
 
     batches = res.get("batches", [])
     probes = res.get("total_probes", 0)
@@ -161,6 +210,8 @@ def evaluate_cluster_scenario(
     discovered_gt_clusters: set[str] = set()
     max_diff_seen = 0.0
 
+    target_gt_set = set(ground_truth_counts.keys())
+
     for b in batches:
         seed = b["seed"]
         members = b["members"]
@@ -168,11 +219,10 @@ def evaluate_cluster_scenario(
         total_members += batch_size_actual
 
         seed_cluster = fn_to_cluster.get(seed["filename"])
-        if seed_cluster:
-            discovered_gt_clusters.add(seed_cluster)
 
         # Calculate purity: members that share seed's cluster
         matches = 0
+        has_matching_peer = False
         for m in members:
             diff_r = m.get("diff_ratio", 0.0)
             if diff_r > max_diff_seen:
@@ -181,18 +231,29 @@ def evaluate_cluster_scenario(
             m_cluster = fn_to_cluster.get(m["filename"])
             if seed_cluster is not None and m_cluster == seed_cluster:
                 matches += 1
+                has_matching_peer = True
 
         purity = (matches + 1) / batch_size_actual
         batch_purities.append(purity)
         if purity >= 0.999:
             perfect_batches += 1
 
+        # Genuine group recovery check:
+        # 1. seed belongs to target ground-truth set
+        # 2. at least one member in batch belongs to the same ground-truth cluster
+        if seed_cluster and seed_cluster in target_gt_set and has_matching_peer:
+            discovered_gt_clusters.add(seed_cluster)
+
     avg_purity = float(np.mean(batch_purities)) if batch_purities else 1.0
     perfect_ratio = (perfect_batches / len(batches)) if batches else 1.0
 
-    # Cluster Recall: fraction of ground truth clusters found
-    num_gt_clusters = len(ground_truth_counts)
-    cluster_recall = (len(discovered_gt_clusters) / num_gt_clusters) if num_gt_clusters else 1.0
+    # Cluster Recall: fraction of target ground-truth clusters recovered with valid peers
+    num_gt_clusters = len(target_gt_set)
+    cluster_recall = (
+        min(1.0, len(discovered_gt_clusters) / num_gt_clusters)
+        if num_gt_clusters > 0
+        else 1.0
+    )
 
     return ScenarioResult(
         scenario_name=scenario_name,

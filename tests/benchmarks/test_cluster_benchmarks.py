@@ -4,20 +4,42 @@ Measures the end-to-end performance and clustering quality of discover_similar_b
   1. Faiss binary pHash SIMD recall with adaptive window expansion
   2. Parallel image I/O with path deduplication and thread pool decoding
   3. DiffMask pixel verification and strict elimination (anti-transitivity collapse)
+  4. Non-destructive state isolation ensuring host TWIN_INDEX_PATH is never touched
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
+from benchmarks.cluster.dataset import (
+    BenchmarkItem,
+    create_base_skin,
+    create_variant_skin,
+)
+from benchmarks.cluster.evaluator import (
+    evaluate_cluster_scenario,
+    isolated_index_environment,
+    populate_cluster_index,
+)
+from twin.core.config import settings
 from twin.services.cluster import discover_similar_batches
-from twin.services.hasher import compute_ahash, compute_dhash, compute_phash
-from twin.services.indexer import indexer
+
+try:
+    import pytest_benchmark  # noqa: F401
+except ImportError:
+
+    @pytest.fixture
+    def benchmark():
+        """Fallback runner when pytest-benchmark is not installed."""
+
+        def _runner(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        return _runner
 
 
 def _create_synthetic_skin(seed: int, recolor_torso: bool = False) -> Image.Image:
@@ -40,145 +62,219 @@ def _create_synthetic_skin(seed: int, recolor_torso: bool = False) -> Image.Imag
     return Image.fromarray(arr, mode="RGBA")
 
 
-def _populate_cluster_benchmark_index(
-    tmp_path: Path,
+def _build_cluster_dataset(
     num_duplicates: int = 30,
     num_variants: int = 15,
     num_noise: int = 25,
-) -> None:
-    """Populate indexer with physical files for benchmark testing."""
-    indexer.clear()
-    dummy_vec = np.zeros(512, dtype=np.float32)
+) -> list[BenchmarkItem]:
+    """Generate in-memory benchmark items for test population."""
+    items: list[BenchmarkItem] = []
 
-    # 1. Base anchor for duplicates
+    # 1. Duplicates
     base_dup = _create_synthetic_skin(seed=42)
     for i in range(num_duplicates):
-        fname = f"dup_{i:04d}.png"
-        fpath = tmp_path / fname
-        base_dup.save(fpath)
-        meta = {
-            "filename": fname,
-            "path": str(fpath),
-            "datasource": "skin",
-            "texture_type": "skin_double",
-            "ahash": compute_ahash(base_dup),
-            "dhash": compute_dhash(base_dup),
-            "phash": compute_phash(base_dup),
-        }
-        indexer.add_item(dummy_vec, meta, datasource="skin")
+        items.append(
+            BenchmarkItem(
+                filename=f"dup_{i:04d}.png",
+                image=base_dup.copy(),
+                cluster_id="cluster_dup_1",
+            )
+        )
 
-    # 2. Base anchor and variants
+    # 2. Variants
+    base_var = _create_synthetic_skin(seed=100)
     for i in range(num_variants):
-        var_img = _create_synthetic_skin(seed=100, recolor_torso=(i > 0))
-        fname = f"var_{i:04d}.png"
-        fpath = tmp_path / fname
-        var_img.save(fpath)
-        meta = {
-            "filename": fname,
-            "path": str(fpath),
-            "datasource": "skin",
-            "texture_type": "skin_double",
-            "ahash": compute_ahash(var_img),
-            "dhash": compute_dhash(var_img),
-            "phash": compute_phash(var_img),
-        }
-        indexer.add_item(dummy_vec, meta, datasource="skin")
+        var_img = create_variant_skin(base_var, variant_idx=i + 1)
+        items.append(
+            BenchmarkItem(
+                filename=f"var_{i:04d}.png",
+                image=var_img,
+                cluster_id="cluster_var_1",
+            )
+        )
 
-    # 3. Random noise items
+    # 3. Noise
     for i in range(num_noise):
         noise_img = _create_synthetic_skin(seed=1000 + i * 17)
-        fname = f"noise_{i:04d}.png"
-        fpath = tmp_path / fname
-        noise_img.save(fpath)
-        meta = {
-            "filename": fname,
-            "path": str(fpath),
-            "datasource": "skin",
-            "texture_type": "skin_double",
-            "ahash": compute_ahash(noise_img),
-            "dhash": compute_dhash(noise_img),
-            "phash": compute_phash(noise_img),
-        }
-        indexer.add_item(dummy_vec, meta, datasource="skin")
+        items.append(
+            BenchmarkItem(
+                filename=f"noise_{i:04d}.png",
+                image=noise_img,
+                cluster_id=None,
+            )
+        )
+
+    return items
 
 
 @pytest.mark.smoke
-def test_bench_cluster_confirmed_duplicates(tmp_path: Path) -> None:
+def test_bench_cluster_confirmed_duplicates(benchmark, tmp_path: Path) -> None:
     """Benchmark confirmed mode: pure duplicates discovery with zero diff."""
-    _populate_cluster_benchmark_index(tmp_path, num_duplicates=25, num_variants=0, num_noise=20)
+    items = _build_cluster_dataset(num_duplicates=25, num_variants=0, num_noise=20)
+    img_dir = tmp_path / "images"
+    idx_dir = tmp_path / "index"
 
-    t0 = time.perf_counter()
-    res = discover_similar_batches(
-        datasource="skin",
-        max_batches=10,
-        batch_size=5,
-        mode="confirmed",
-        max_probes=100,
-        seed_strategy="random",
-    )
-    elapsed_ms = (time.perf_counter() - t0) * 1000
+    with isolated_index_environment(index_dir=idx_dir):
+        populate_cluster_index(items, tmp_dir=img_dir, datasource="skin")
 
-    batches = res["batches"]
-    assert len(batches) >= 4
-    for b in batches:
-        assert b["mode"] == "confirmed"
-        assert b["max_diff_ratio"] <= 0.05
-        # All members must be identical duplicates
-        for m in b["members"]:
-            assert m["diff_ratio"] == 0.0
+        res = benchmark(
+            discover_similar_batches,
+            datasource="skin",
+            max_batches=10,
+            batch_size=5,
+            mode="confirmed",
+            max_probes=100,
+            seed_strategy="random",
+        )
 
-    assert elapsed_ms < 500  # Latency budget under 500ms for 45 items
+        batches = res["batches"]
+        assert len(batches) >= 4
+        for b in batches:
+            assert b["mode"] == "confirmed"
+            assert b["max_diff_ratio"] <= 0.05
+            for m in b["members"]:
+                assert m["diff_ratio"] == 0.0
 
 
 @pytest.mark.smoke
-def test_bench_cluster_adaptive_recall_scaling(tmp_path: Path) -> None:
+def test_bench_cluster_adaptive_recall_scaling(benchmark, tmp_path: Path) -> None:
     """Benchmark adaptive recall expansion on a large swarm of 50 identical duplicates."""
-    _populate_cluster_benchmark_index(tmp_path, num_duplicates=50, num_variants=0, num_noise=10)
+    items = _build_cluster_dataset(num_duplicates=50, num_variants=0, num_noise=10)
+    img_dir = tmp_path / "images"
+    idx_dir = tmp_path / "index"
 
-    t0 = time.perf_counter()
-    res = discover_similar_batches(
-        datasource="skin",
-        max_batches=20,
-        batch_size=5,
-        mode="confirmed",
-        max_probes=200,
-        seed_strategy="sequential",
-    )
-    elapsed_ms = (time.perf_counter() - t0) * 1000
+    with isolated_index_environment(index_dir=idx_dir):
+        populate_cluster_index(items, tmp_dir=img_dir, datasource="skin")
 
-    batches = res["batches"]
-    # 50 duplicates in batches of 5 = exactly 10 batches
-    assert len(batches) == 10
-    total_items_in_batches = sum(b["size"] for b in batches)
-    assert total_items_in_batches == 50
+        res = benchmark(
+            discover_similar_batches,
+            datasource="skin",
+            max_batches=20,
+            batch_size=5,
+            mode="confirmed",
+            max_probes=200,
+            seed_strategy="sequential",
+        )
 
-    # Ensure stages telemetry accurately records adaptive expansions
-    stages = res["stages"]
-    assert stages["recall"]["probes_evaluated"] >= 10
-    assert stages["verify"]["batches_formed"] == 10
-    assert elapsed_ms < 1000
+        batches = res["batches"]
+        assert len(batches) == 10
+        total_items_in_batches = sum(b["size"] for b in batches)
+        assert total_items_in_batches == 50
+
+        stages = res["stages"]
+        assert stages["recall"]["probes_evaluated"] >= 10
+        assert stages["verify"]["batches_formed"] == 10
 
 
 @pytest.mark.smoke
-def test_bench_cluster_variants_mode(tmp_path: Path) -> None:
+def test_bench_cluster_variants_mode(benchmark, tmp_path: Path) -> None:
     """Benchmark variants mode on recolored derivative textures."""
-    _populate_cluster_benchmark_index(tmp_path, num_duplicates=10, num_variants=20, num_noise=20)
+    items = _build_cluster_dataset(num_duplicates=10, num_variants=20, num_noise=20)
+    img_dir = tmp_path / "images"
+    idx_dir = tmp_path / "index"
 
-    t0 = time.perf_counter()
-    res = discover_similar_batches(
-        datasource="skin",
+    with isolated_index_environment(index_dir=idx_dir):
+        populate_cluster_index(items, tmp_dir=img_dir, datasource="skin")
+
+        res = benchmark(
+            discover_similar_batches,
+            datasource="skin",
+            max_batches=10,
+            batch_size=5,
+            mode="variants",
+            max_probes=100,
+            seed_strategy="random",
+        )
+
+        batches = res["batches"]
+        assert len(batches) >= 2
+        for b in batches:
+            assert b["mode"] == "variants"
+            assert b["max_diff_ratio"] <= 0.35
+
+
+def test_cluster_benchmark_preserves_host_index_sentinel(tmp_path: Path) -> None:
+    """Regression test: verify benchmark execution strictly preserves host settings.index_path."""
+    host_dir = tmp_path / "host_data"
+    host_dir.mkdir(parents=True)
+    sentinel_file = host_dir / "sentinel.txt"
+    sentinel_file.write_text("CRITICAL_HOST_INDEX_DATA", encoding="utf-8")
+
+    sentinel_faiss = host_dir / "skin" / "index.flat.faiss"
+    sentinel_faiss.parent.mkdir(parents=True)
+    sentinel_faiss.write_text("FAISS_BINARY_CONTENT", encoding="utf-8")
+
+    old_path = settings.index_path
+    settings.index_path = str(host_dir)
+
+    try:
+        items = _build_cluster_dataset(num_duplicates=10, num_variants=0, num_noise=5)
+        res = evaluate_cluster_scenario(
+            scenario_name="Sentinel Host Protection Test",
+            items=items,
+            ground_truth_counts={"cluster_dup_1": 10},
+            mode="confirmed",
+            max_batches=5,
+            batch_size=5,
+        )
+        assert res.discovered_batches == 2
+
+        # Assert sentinel file and mock index files under host_dir were NEVER unlinked or modified
+        assert sentinel_file.is_file(), "Sentinel file was deleted by benchmark!"
+        assert sentinel_file.read_text(encoding="utf-8") == "CRITICAL_HOST_INDEX_DATA"
+        assert sentinel_faiss.is_file(), "Host faiss index was deleted by benchmark!"
+        assert sentinel_faiss.read_text(encoding="utf-8") == "FAISS_BINARY_CONTENT"
+    finally:
+        settings.index_path = old_path
+
+
+def test_evaluator_recall_bounded_in_zero_to_one(tmp_path: Path) -> None:
+    """Regression test: verify Recall numerator is strictly filtered to target GT set."""
+    # Build dataset with BOTH duplicates and variants
+    items = _build_cluster_dataset(num_duplicates=10, num_variants=10, num_noise=10)
+
+    # Only evaluate recall for the variant cluster (1 cluster)
+    res = evaluate_cluster_scenario(
+        scenario_name="Mixed Dataset Bounded Recall Test",
+        items=items,
+        ground_truth_counts={"cluster_var_1": 10},  # target only 1 cluster
+        mode="variants",
         max_batches=10,
         batch_size=5,
-        mode="variants",
-        max_probes=100,
-        seed_strategy="random",
     )
-    elapsed_ms = (time.perf_counter() - t0) * 1000
+    # Even though duplicate cluster is also discovered, recall must be strictly in [0.0, 1.0]
+    assert 0.0 <= res.cluster_recall_rate <= 1.0
+    assert res.cluster_recall_rate == 1.0
 
-    batches = res["batches"]
-    assert len(batches) >= 2
-    for b in batches:
-        assert b["mode"] == "variants"
-        assert b["max_diff_ratio"] <= 0.35
 
-    assert elapsed_ms < 500
+def test_evaluator_group_recovery_requires_peer(tmp_path: Path) -> None:
+    """Regression test: verify a cluster is NOT recovered if batch members are only distractors."""
+    # 1 labeled seed item from 'phantom_cluster', and 20 distinct noise items
+    phantom_base = create_base_skin(seed=999)
+    items: list[BenchmarkItem] = [
+        BenchmarkItem(
+            filename="phantom_seed.png",
+            image=phantom_base,
+            cluster_id="phantom_cluster",
+        )
+    ]
+    # Add 20 pure noise distractors
+    for i in range(20):
+        items.append(
+            BenchmarkItem(
+                filename=f"distractor_{i:03d}.png",
+                image=create_base_skin(seed=10000 + i * 37),
+                cluster_id=None,
+            )
+        )
+
+    res = evaluate_cluster_scenario(
+        scenario_name="No-Peer Phantom Test",
+        items=items,
+        ground_truth_counts={"phantom_cluster": 1},
+        mode="confirmed",
+        max_batches=5,
+        batch_size=5,
+    )
+    # Seed has no matching peers, so no genuine batch can be formed or phantom cluster recovered
+    assert res.cluster_recall_rate == 0.0

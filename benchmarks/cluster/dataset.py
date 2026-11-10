@@ -82,19 +82,29 @@ def create_base_skin(
 
 
 def create_variant_skin(base_img: Image.Image, variant_idx: int) -> Image.Image:
-    """Derive a controlled variant with diff_ratio within [0.08, 0.30] and Hamming <= 12."""
+    """Derive a controlled, unique variant with diff_ratio in [0.08, 0.32] and Hamming <= 12."""
     arr = np.array(base_img.convert("RGBA")).copy()
+    shift = 30 + ((variant_idx * 37) % 180)
 
-    if variant_idx % 3 == 0:
-        # Partial torso recolor (shirt recolor ~ 15% diff)
-        arr[20:32, 20:36, :3] = (arr[20:32, 20:36, :3].astype(int) + 60) % 255
-    elif variant_idx % 3 == 1:
-        # Lower body hue shift (~ 22% diff)
-        arr[32:44, :, :3] = (arr[32:44, :, :3].astype(int) + 120) % 255
+    mode = variant_idx % 6
+    if mode == 0:
+        # Torso central recolor
+        arr[20:30, 22:38, :3] = (arr[20:30, 22:38, :3].astype(int) + shift) % 255
+    elif mode == 1:
+        # Legs recolor
+        arr[34:46, 16:48, :3] = (arr[34:46, 16:48, :3].astype(int) + shift) % 255
+    elif mode == 2:
+        # Head & face accents
+        arr[8:14, 12:28, :3] = (arr[8:14, 12:28, :3].astype(int) + shift + 40) % 255
+    elif mode == 3:
+        # Arms / sleeves recolor
+        arr[20:32, 44:54, :3] = (arr[20:32, 44:54, :3].astype(int) + shift) % 255
+    elif mode == 4:
+        # Torso + shoulder accent
+        arr[20:26, 18:42, :3] = (arr[20:26, 18:42, :3].astype(int) + shift + 70) % 255
     else:
-        # Limb & helmet edit (~ 12% diff)
-        arr[8:16, 16:24, :3] = 255 - arr[8:16, 16:24, :3]
-        arr[20:32, 48:56, :3] = 255 - arr[20:32, 48:56, :3]
+        # Lower leg boots
+        arr[40:48, 8:56, :3] = (arr[40:48, 8:56, :3].astype(int) + shift + 50) % 255
 
     return Image.fromarray(arr, mode="RGBA")
 
