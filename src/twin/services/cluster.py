@@ -31,7 +31,7 @@ from PIL import Image
 from twin.api.schemas import DiscoveryMode
 from twin.core.config import settings
 from twin.services.hasher import hamming_distance
-from twin.services.indexer import indexer
+from twin.services.indexer import Indexer, indexer
 from twin.services.verifiers import DiffMaskVerifier
 from twin.utils.image import load_images
 
@@ -67,6 +67,8 @@ def discover_similar_batches(
     mode: DiscoveryMode = "confirmed",
     max_probes: int = 200,
     seed_strategy: SeedStrategy = "random",
+    indexer_instance: Indexer | None = None,
+    random_seed: int | None = None,
 ) -> dict[str, Any]:
     """Discover batches of similar textures without an input seed image.
 
@@ -77,6 +79,8 @@ def discover_similar_batches(
         mode: "confirmed" (strict duplicates) or "variants" (recolors/edits).
         max_probes: Maximum number of seed exploration attempts.
         seed_strategy: "random" or "sequential".
+        indexer_instance: Optional Indexer instance. If None, uses global singleton.
+        random_seed: Optional PRNG seed for deterministic candidate shuffling.
 
     Returns:
         Dictionary containing discovered batches, count, probes, performance metrics,
@@ -92,7 +96,8 @@ def discover_similar_batches(
         )
 
     t0 = time.perf_counter()
-    total_items = indexer.get_count(datasource=datasource)
+    active_indexer = indexer_instance if indexer_instance is not None else indexer
+    total_items = active_indexer.get_count(datasource=datasource)
 
     empty_stages = {
         "recall": {"probes_evaluated": 0, "candidates_recalled": 0, "elapsed_ms": 0.0},
@@ -131,7 +136,8 @@ def discover_similar_batches(
     candidate_seeds: list[int] = list(unvisited)
 
     if seed_strategy == "random":
-        random.shuffle(candidate_seeds)
+        rng = random.Random(random_seed)
+        rng.shuffle(candidate_seeds)
 
     verifier = DiffMaskVerifier()
     batches: list[dict[str, Any]] = []
@@ -159,7 +165,7 @@ def discover_similar_batches(
 
         probes += 1
 
-        seed_meta = indexer.get_metadata(seed_idx, datasource=datasource)
+        seed_meta = active_indexer.get_metadata(seed_idx, datasource=datasource)
         if not seed_meta:
             unvisited.discard(seed_idx)
             continue
@@ -180,7 +186,7 @@ def discover_similar_batches(
 
         while True:
             t_rec_0 = time.perf_counter()
-            dists, ids = indexer.search_binary(seed_phash, k=curr_k, datasource=datasource)
+            dists, ids = active_indexer.search_binary(seed_phash, k=curr_k, datasource=datasource)
             t_recall_total += time.perf_counter() - t_rec_0
 
             candidate_ids.clear()
@@ -225,7 +231,7 @@ def discover_similar_batches(
             paths_to_load.append(seed_path)
 
         for cand_idx in candidate_ids:
-            c_meta = indexer.get_metadata(cand_idx, datasource=datasource)
+            c_meta = active_indexer.get_metadata(cand_idx, datasource=datasource)
             if c_meta:
                 cand_metas[cand_idx] = c_meta
                 c_path = c_meta.get("path", "")

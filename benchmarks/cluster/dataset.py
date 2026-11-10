@@ -4,6 +4,8 @@ Provides ground-truth labeled clusters of Minecraft skins across:
 1. Exact Duplicate Swarms (tests adaptive recall expansion and Top-K penetration).
 2. Multi-cluster Derivative Variants (tests recolors, edits, and DiffMask verification).
 3. Sparse Real-World Haystack (tests discovery amidst real community skins from images.zip).
+4. Threshold Boundary Scenarios (tests strict boundary gating).
+5. Transitivity Chain Scenarios (tests anti-transitivity collapse via greedy leader elimination).
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import numpy as np
 from PIL import Image
 
 from twin.services.classifier import TextureKind, inspect_texture
+from twin.services.hasher import compute_phash, hamming_distance
+from twin.services.verifiers import DiffMaskVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -84,29 +88,69 @@ def create_base_skin(
 def create_variant_skin(base_img: Image.Image, variant_idx: int) -> Image.Image:
     """Derive a controlled, unique variant with diff_ratio in [0.08, 0.32] and Hamming <= 12."""
     arr = np.array(base_img.convert("RGBA")).copy()
-    shift = 30 + ((variant_idx * 37) % 180)
+    valid_coords = np.argwhere(arr[:, :, 3] > 10)
+    num_valid = len(valid_coords)
+    if num_valid == 0:
+        return base_img.copy()
 
-    mode = variant_idx % 6
-    if mode == 0:
-        # Torso central recolor
-        arr[20:30, 22:38, :3] = (arr[20:30, 22:38, :3].astype(int) + shift) % 255
-    elif mode == 1:
-        # Legs recolor
-        arr[34:46, 16:48, :3] = (arr[34:46, 16:48, :3].astype(int) + shift) % 255
-    elif mode == 2:
-        # Head & face accents
-        arr[8:14, 12:28, :3] = (arr[8:14, 12:28, :3].astype(int) + shift + 40) % 255
-    elif mode == 3:
-        # Arms / sleeves recolor
-        arr[20:32, 44:54, :3] = (arr[20:32, 44:54, :3].astype(int) + shift) % 255
-    elif mode == 4:
-        # Torso + shoulder accent
-        arr[20:26, 18:42, :3] = (arr[20:26, 18:42, :3].astype(int) + shift + 70) % 255
-    else:
-        # Lower leg boots
-        arr[40:48, 8:56, :3] = (arr[40:48, 8:56, :3].astype(int) + shift + 50) % 255
+    # Target diff ratio in [0.12, 0.26]
+    target_ratio = 0.12 + ((variant_idx * 3) % 15) * 0.01
+    count = int(num_valid * target_ratio)
+
+    stride = max(1, num_valid // count)
+    start_offset = (variant_idx * 137) % num_valid
+    indices = [(start_offset + i * stride) % num_valid for i in range(count)]
+    selected_coords = valid_coords[indices]
+
+    shift = 35 + ((variant_idx * 29) % 40)
+    ch = variant_idx % 3
+
+    for y, x in selected_coords:
+        val = int(arr[y, x, ch]) + shift
+        arr[y, x, ch] = val % 256
 
     return Image.fromarray(arr, mode="RGBA")
+
+
+def verify_variant_contracts(
+    base_img: Image.Image,
+    variants: list[Image.Image],
+    min_diff: float = 0.08,
+    max_diff: float = 0.32,
+    max_hamming: int = 12,
+    min_pairwise_diff: float = 0.01,
+) -> None:
+    """Verify physical contracts of generated variants using verifier and pHash.
+
+    Raises:
+        AssertionError: If any variant violates DiffMask bounds, Hamming distance,
+                        or pair-wise uniqueness.
+    """
+    verifier = DiffMaskVerifier()
+    base_phash = compute_phash(base_img)
+
+    for idx, var in enumerate(variants):
+        diff = verifier.verify(base_img, var).diff_ratio
+        h_dist = hamming_distance(base_phash, compute_phash(var))
+
+        if not (min_diff <= diff <= max_diff):
+            raise AssertionError(
+                f"Variant {idx} violated diff_ratio contract: "
+                f"{diff:.4f} not in [{min_diff}, {max_diff}]"
+            )
+        if h_dist > max_hamming:
+            raise AssertionError(
+                f"Variant {idx} violated Hamming contract: {h_dist} > {max_hamming}"
+            )
+
+    # Check pair-wise uniqueness
+    for i in range(len(variants)):
+        for j in range(i + 1, len(variants)):
+            pair_diff = verifier.verify(variants[i], variants[j]).diff_ratio
+            if pair_diff < min_pairwise_diff:
+                raise AssertionError(
+                    f"Variants {i} and {j} are identical or too close: diff_ratio={pair_diff:.4f}"
+                )
 
 
 def build_duplicate_swarms_dataset(
@@ -130,7 +174,6 @@ def build_duplicate_swarms_dataset(
         base = create_base_skin(seed=seed + c_idx * 17)
 
         for item_idx in range(swarm_size):
-            # Identical pixels with slight metadata variation
             img = base.copy()
             filename = f"c{c_idx + 1}_item_{item_idx:03d}.png"
             items.append(
@@ -185,8 +228,10 @@ def build_variant_clusters_dataset(
         )
 
         # Remaining items are controlled variants
+        cluster_variants: list[Image.Image] = []
         for v_idx in range(1, items_per_cluster):
             var_img = create_variant_skin(base, variant_idx=v_idx)
+            cluster_variants.append(var_img)
             items.append(
                 BenchmarkItem(
                     filename=f"v{c_idx + 1}_var_{v_idx}.png",
@@ -194,6 +239,9 @@ def build_variant_clusters_dataset(
                     cluster_id=cluster_id,
                 )
             )
+
+        # Enforce physical dataset contracts at generation time
+        verify_variant_contracts(base, cluster_variants)
 
     # Add distractors
     for d_idx in range(distractor_count):
@@ -302,8 +350,10 @@ def build_sparse_real_haystack(
                 cluster_id=cluster_id,
             )
         )
+        cluster_variants = []
         for sub_idx in range(1, v_size):
             v_img = create_variant_skin(anchor_img, variant_idx=sub_idx)
+            cluster_variants.append(v_img)
             items.append(
                 BenchmarkItem(
                     filename=f"varc_{v_idx + 1}_member_{sub_idx}.png",
@@ -311,6 +361,110 @@ def build_sparse_real_haystack(
                     cluster_id=cluster_id,
                 )
             )
+        verify_variant_contracts(anchor_img, cluster_variants)
 
     rng.shuffle(items)
+    return items, ground_truth_counts
+
+
+def build_boundary_dataset(
+    seed: int = 400,
+) -> tuple[list[BenchmarkItem], dict[str, int]]:
+    """Build dataset with near-boundary and beyond-boundary samples.
+
+    Tests strict rejection when DiffMask ratio or Hamming distance exceeds thresholds.
+    """
+    items: list[BenchmarkItem] = []
+    ground_truth_counts: dict[str, int] = {}
+    base = create_base_skin(seed=seed)
+    valid_coords = np.argwhere(np.array(base)[:, :, 3] > 10)
+    num_valid = len(valid_coords)
+
+    # Cluster 1: Confirmed duplicates boundary (diff ~ 0.045 < 0.05)
+    cluster_conf = "boundary_confirmed_cluster"
+    ground_truth_counts[cluster_conf] = 2
+    items.append(
+        BenchmarkItem(filename="conf_base.png", image=base.copy(), cluster_id=cluster_conf)
+    )
+
+    arr_conf_near = np.array(base).copy()
+    count_near = int(num_valid * 0.045)
+    for y, x in valid_coords[:count_near]:
+        arr_conf_near[y, x, 0] = (int(arr_conf_near[y, x, 0]) + 40) % 256
+    items.append(
+        BenchmarkItem(
+            filename="conf_member_near.png",
+            image=Image.fromarray(arr_conf_near, mode="RGBA"),
+            cluster_id=cluster_conf,
+        )
+    )
+
+    # Distractor: Just beyond confirmed limit (diff ~ 0.065 > 0.05)
+    # Uses disjoint coordinates [0.10 : 0.165] so it does not collapse with conf_member_near
+    arr_conf_beyond = np.array(base).copy()
+    start_beyond = int(num_valid * 0.10)
+    end_beyond = int(num_valid * 0.165)
+    for y, x in valid_coords[start_beyond:end_beyond]:
+        arr_conf_beyond[y, x, 0] = (int(arr_conf_beyond[y, x, 0]) + 40) % 256
+    items.append(
+        BenchmarkItem(
+            filename="conf_distractor_beyond.png",
+            image=Image.fromarray(arr_conf_beyond, mode="RGBA"),
+            cluster_id=None,
+        )
+    )
+
+    # Distractor: Just beyond variants limit (diff ~ 0.380 > 0.35)
+    arr_var_beyond = np.array(base).copy()
+    start_var = int(num_valid * 0.30)
+    end_var = int(num_valid * 0.68)
+    for y, x in valid_coords[start_var:end_var]:
+        arr_var_beyond[y, x, 1] = (int(arr_var_beyond[y, x, 1]) + 60) % 256
+    items.append(
+        BenchmarkItem(
+            filename="var_distractor_beyond.png",
+            image=Image.fromarray(arr_var_beyond, mode="RGBA"),
+            cluster_id=None,
+        )
+    )
+
+    return items, ground_truth_counts
+
+
+def build_transitivity_chain_dataset(
+    seed: int = 500,
+) -> tuple[list[BenchmarkItem], dict[str, int]]:
+    """Build transitivity chain dataset: A ~ B (0.18), B ~ C (0.20), A !~ C (0.50).
+
+    Tests that Greedy Leader Dynamic Elimination clusters A with B and eliminates B,
+    preventing non-transitive collapse where C gets improperly merged into A.
+    """
+    items: list[BenchmarkItem] = []
+    ground_truth_counts: dict[str, int] = {}
+    base_a = create_base_skin(seed=seed)
+    valid_coords = np.argwhere(np.array(base_a)[:, :, 3] > 10)
+    num_valid = len(valid_coords)
+
+    # A and B belong to the same cluster
+    cluster_id = "transitivity_cluster_ab"
+    ground_truth_counts[cluster_id] = 2
+
+    # Item A
+    items.append(BenchmarkItem(filename="chain_A.png", image=base_a.copy(), cluster_id=cluster_id))
+
+    # Item B: diff(A, B) ~ 0.18
+    arr_b = np.array(base_a).copy()
+    for y, x in valid_coords[: int(num_valid * 0.18)]:
+        arr_b[y, x, 0] = (int(arr_b[y, x, 0]) + 60) % 256
+    img_b = Image.fromarray(arr_b, mode="RGBA")
+    items.append(BenchmarkItem(filename="chain_B.png", image=img_b, cluster_id=cluster_id))
+
+    # Item C: diff(B, C) ~ 0.20, diff(A, C) ~ 0.48
+    arr_c = np.array(arr_b).copy()
+    for y, x in valid_coords[int(num_valid * 0.18) : int(num_valid * 0.48)]:
+        arr_c[y, x, 1] = (int(arr_c[y, x, 1]) + 90) % 256
+    img_c = Image.fromarray(arr_c, mode="RGBA")
+    # C is an isolated item (does not belong to AB cluster)
+    items.append(BenchmarkItem(filename="chain_C.png", image=img_c, cluster_id=None))
+
     return items, ground_truth_counts

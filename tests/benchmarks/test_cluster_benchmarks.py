@@ -1,10 +1,10 @@
-"""Benchmarks for seedless texture discovery and clustering via Greedy Leader Elimination.
+"""Benchmarks and correctness tests for seedless texture discovery via Greedy Leader Elimination.
 
-Measures the end-to-end performance and clustering quality of discover_similar_batches():
-  1. Faiss binary pHash SIMD recall with adaptive window expansion
-  2. Parallel image I/O with path deduplication and thread pool decoding
-  3. DiffMask pixel verification and strict elimination (anti-transitivity collapse)
-  4. Non-destructive state isolation ensuring host TWIN_INDEX_PATH is never touched
+Four-tiered verification:
+  1. Performance Benchmarks: Integrates with pytest-benchmark (--benchmark-only)
+  2. Memory & Disk Sentinel Isolation: Verifies global indexer singleton & host disk are untouched
+  3. Deterministic Reproducibility: Verifies identical batches with fixed PRNG seed
+  4. Mathematical Contracts & Boundaries: Verifies strict threshold rejection & anti-transitivity
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from PIL import Image
 
 from benchmarks.cluster.dataset import (
     BenchmarkItem,
+    build_boundary_dataset,
+    build_transitivity_chain_dataset,
     create_base_skin,
     create_variant_skin,
 )
@@ -27,6 +29,7 @@ from benchmarks.cluster.evaluator import (
 )
 from twin.core.config import settings
 from twin.services.cluster import discover_similar_batches
+from twin.services.indexer import Indexer, indexer
 
 try:
     import pytest_benchmark  # noqa: F401
@@ -114,8 +117,11 @@ def test_bench_cluster_confirmed_duplicates(benchmark, tmp_path: Path) -> None:
     img_dir = tmp_path / "images"
     idx_dir = tmp_path / "index"
 
+    sandbox = Indexer()
     with isolated_index_environment(index_dir=idx_dir):
-        populate_cluster_index(items, tmp_dir=img_dir, datasource="skin")
+        populate_cluster_index(
+            items, tmp_dir=img_dir, datasource="skin", indexer_instance=sandbox
+        )
 
         res = benchmark(
             discover_similar_batches,
@@ -125,6 +131,8 @@ def test_bench_cluster_confirmed_duplicates(benchmark, tmp_path: Path) -> None:
             mode="confirmed",
             max_probes=100,
             seed_strategy="random",
+            indexer_instance=sandbox,
+            random_seed=42,
         )
 
         batches = res["batches"]
@@ -143,8 +151,11 @@ def test_bench_cluster_adaptive_recall_scaling(benchmark, tmp_path: Path) -> Non
     img_dir = tmp_path / "images"
     idx_dir = tmp_path / "index"
 
+    sandbox = Indexer()
     with isolated_index_environment(index_dir=idx_dir):
-        populate_cluster_index(items, tmp_dir=img_dir, datasource="skin")
+        populate_cluster_index(
+            items, tmp_dir=img_dir, datasource="skin", indexer_instance=sandbox
+        )
 
         res = benchmark(
             discover_similar_batches,
@@ -154,6 +165,8 @@ def test_bench_cluster_adaptive_recall_scaling(benchmark, tmp_path: Path) -> Non
             mode="confirmed",
             max_probes=200,
             seed_strategy="sequential",
+            indexer_instance=sandbox,
+            random_seed=42,
         )
 
         batches = res["batches"]
@@ -173,8 +186,11 @@ def test_bench_cluster_variants_mode(benchmark, tmp_path: Path) -> None:
     img_dir = tmp_path / "images"
     idx_dir = tmp_path / "index"
 
+    sandbox = Indexer()
     with isolated_index_environment(index_dir=idx_dir):
-        populate_cluster_index(items, tmp_dir=img_dir, datasource="skin")
+        populate_cluster_index(
+            items, tmp_dir=img_dir, datasource="skin", indexer_instance=sandbox
+        )
 
         res = benchmark(
             discover_similar_batches,
@@ -184,6 +200,8 @@ def test_bench_cluster_variants_mode(benchmark, tmp_path: Path) -> None:
             mode="variants",
             max_probes=100,
             seed_strategy="random",
+            indexer_instance=sandbox,
+            random_seed=42,
         )
 
         batches = res["batches"]
@@ -193,8 +211,8 @@ def test_bench_cluster_variants_mode(benchmark, tmp_path: Path) -> None:
             assert b["max_diff_ratio"] <= 0.35
 
 
-def test_cluster_benchmark_preserves_host_index_sentinel(tmp_path: Path) -> None:
-    """Regression test: verify benchmark execution strictly preserves host settings.index_path."""
+def test_cluster_memory_and_disk_isolation_sentinel(tmp_path: Path) -> None:
+    """Regression test: verify benchmark execution preserves host disk and memory singleton."""
     host_dir = tmp_path / "host_data"
     host_dir.mkdir(parents=True)
     sentinel_file = host_dir / "sentinel.txt"
@@ -205,10 +223,24 @@ def test_cluster_benchmark_preserves_host_index_sentinel(tmp_path: Path) -> None
     sentinel_faiss.write_text("FAISS_BINARY_CONTENT", encoding="utf-8")
 
     old_path = settings.index_path
+
+    # 1. Pre-populate global indexer singleton with 10 dummy items in memory
+    indexer.clear()
+    dummy_vec = np.zeros(512, dtype=np.float32)
+    for i in range(10):
+        indexer.add_item(
+            dummy_vec,
+            {"filename": f"host_singleton_{i}.png", "path": f"/host/{i}.png"},
+            datasource="skin",
+        )
+    assert indexer.get_count("skin") == 10
+
+    # Point settings.index_path to host_dir containing critical data
     settings.index_path = str(host_dir)
 
     try:
         items = _build_cluster_dataset(num_duplicates=10, num_variants=0, num_noise=5)
+        # Execute benchmark scenario (must use decoupled sandbox indexer)
         res = evaluate_cluster_scenario(
             scenario_name="Sentinel Host Protection Test",
             items=items,
@@ -219,37 +251,119 @@ def test_cluster_benchmark_preserves_host_index_sentinel(tmp_path: Path) -> None
         )
         assert res.discovered_batches == 2
 
-        # Assert sentinel file and mock index files under host_dir were NEVER unlinked or modified
+        # Assert disk sentinel files were NEVER unlinked or modified
         assert sentinel_file.is_file(), "Sentinel file was deleted by benchmark!"
         assert sentinel_file.read_text(encoding="utf-8") == "CRITICAL_HOST_INDEX_DATA"
         assert sentinel_faiss.is_file(), "Host faiss index was deleted by benchmark!"
         assert sentinel_faiss.read_text(encoding="utf-8") == "FAISS_BINARY_CONTENT"
+
+        # Assert global in-memory singleton was completely unpolluted!
+        assert indexer.get_count("skin") == 10, (
+            f"Global indexer was mutated! Count is {indexer.get_count('skin')}, expected 10."
+        )
+        first_meta = indexer.get_metadata(0, datasource="skin")
+        assert first_meta is not None and first_meta["filename"] == "host_singleton_0.png"
     finally:
         settings.index_path = old_path
+        indexer.clear()
 
 
-def test_evaluator_recall_bounded_in_zero_to_one(tmp_path: Path) -> None:
+def test_cluster_deterministic_reproducibility() -> None:
+    """Verify identical batches and metrics across runs with the same PRNG seed."""
+    items = _build_cluster_dataset(num_duplicates=15, num_variants=10, num_noise=15)
+    gt_counts = {"cluster_dup_1": 15, "cluster_var_1": 10}
+
+    # Run 1
+    res1 = evaluate_cluster_scenario(
+        scenario_name="Deterministic Run 1",
+        items=items,
+        ground_truth_counts=gt_counts,
+        mode="confirmed",
+        random_seed=42,
+        seed_strategy="random",
+    )
+
+    # Run 2
+    res2 = evaluate_cluster_scenario(
+        scenario_name="Deterministic Run 2",
+        items=items,
+        ground_truth_counts=gt_counts,
+        mode="confirmed",
+        random_seed=42,
+        seed_strategy="random",
+    )
+
+    assert res1.discovered_batches == res2.discovered_batches
+    assert res1.avg_batch_purity == res2.avg_batch_purity
+    assert res1.cluster_recall_rate == res2.cluster_recall_rate
+    assert res1.member_coverage_rate == res2.member_coverage_rate
+    assert res1.max_observed_diff_ratio == res2.max_observed_diff_ratio
+
+
+def test_cluster_boundary_rejection() -> None:
+    """Verify strict rejection when diff_ratio exceeds threshold."""
+    items, gt_counts = build_boundary_dataset(seed=401)
+
+    # In confirmed mode (max_diff = 0.05):
+    # - conf_member_near (diff ~ 0.045) should be grouped with conf_base
+    # - conf_distractor_beyond (diff ~ 0.065) must NOT be grouped
+    res = evaluate_cluster_scenario(
+        scenario_name="Boundary Rejection Test",
+        items=items,
+        ground_truth_counts=gt_counts,
+        mode="confirmed",
+        batch_size=5,
+        max_batches=5,
+        seed_strategy="sequential",
+    )
+
+    assert res.discovered_batches == 1
+    assert res.avg_batch_purity == 1.0
+    assert res.max_observed_diff_ratio <= 0.05
+
+
+def test_cluster_transitivity_chain_elimination() -> None:
+    """Verify Greedy Leader Dynamic Elimination prevents non-transitive cluster collapse."""
+    items, gt_counts = build_transitivity_chain_dataset(seed=501)
+
+    # A ~ B (0.18), B ~ C (0.20), A !~ C (0.48)
+    # Under variants mode (threshold = 0.35):
+    # Cluster AB should form, B eliminated, C must NOT be in cluster AB
+    res = evaluate_cluster_scenario(
+        scenario_name="Transitivity Chain Test",
+        items=items,
+        ground_truth_counts=gt_counts,
+        mode="variants",
+        batch_size=5,
+        max_batches=5,
+        seed_strategy="sequential",
+    )
+
+    assert res.discovered_batches == 1
+    assert res.avg_batch_purity == 1.0
+    assert res.max_observed_diff_ratio <= 0.35
+
+
+def test_evaluator_recall_bounded_in_zero_to_one() -> None:
     """Regression test: verify Recall numerator is strictly filtered to target GT set."""
-    # Build dataset with BOTH duplicates and variants
     items = _build_cluster_dataset(num_duplicates=10, num_variants=10, num_noise=10)
 
-    # Only evaluate recall for the variant cluster (1 cluster)
     res = evaluate_cluster_scenario(
         scenario_name="Mixed Dataset Bounded Recall Test",
         items=items,
-        ground_truth_counts={"cluster_var_1": 10},  # target only 1 cluster
+        ground_truth_counts={"cluster_var_1": 10},
         mode="variants",
         max_batches=10,
         batch_size=5,
+        random_seed=42,
     )
-    # Even though duplicate cluster is also discovered, recall must be strictly in [0.0, 1.0]
     assert 0.0 <= res.cluster_recall_rate <= 1.0
+    assert 0.0 <= res.member_coverage_rate <= 1.0
     assert res.cluster_recall_rate == 1.0
 
 
-def test_evaluator_group_recovery_requires_peer(tmp_path: Path) -> None:
+def test_evaluator_group_recovery_requires_peer() -> None:
     """Regression test: verify a cluster is NOT recovered if batch members are only distractors."""
-    # 1 labeled seed item from 'phantom_cluster', and 20 distinct noise items
     phantom_base = create_base_skin(seed=999)
     items: list[BenchmarkItem] = [
         BenchmarkItem(
@@ -258,7 +372,6 @@ def test_evaluator_group_recovery_requires_peer(tmp_path: Path) -> None:
             cluster_id="phantom_cluster",
         )
     ]
-    # Add 20 pure noise distractors
     for i in range(20):
         items.append(
             BenchmarkItem(
@@ -275,6 +388,6 @@ def test_evaluator_group_recovery_requires_peer(tmp_path: Path) -> None:
         mode="confirmed",
         max_batches=5,
         batch_size=5,
+        random_seed=42,
     )
-    # Seed has no matching peers, so no genuine batch can be formed or phantom cluster recovered
     assert res.cluster_recall_rate == 0.0
