@@ -14,15 +14,21 @@ from twin.api.schemas import (
     DiscoverStages,
     SimilarBatchItem,
 )
+from twin.core.config import settings
 from twin.main import app
 from twin.services.cluster import discover_similar_batches
+from twin.services.embedding import get_embedding_dim
 from twin.services.hasher import compute_ahash, compute_dhash, compute_phash
 from twin.services.indexer import indexer
+from twin.services.verifiers import DiffMaskVerifier
 
 
 @pytest.fixture(autouse=True)
-def clean_index():
-    """Ensure clean indexer state before and after each test."""
+def clean_index(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Ensure clean indexer state before and after each test inside an isolated temp dir."""
+    idx_dir = tmp_path_factory.mktemp("test_discover_index")
+    monkeypatch.setattr(settings, "index_path", str(idx_dir))
+    monkeypatch.setenv("TWIN_INDEX_PATH", str(idx_dir))
     indexer.clear()
     yield
     indexer.clear()
@@ -65,7 +71,7 @@ def _index_skin(img: Image.Image, filename: str, tmp_path: Path, datasource: str
     """Save image to real disk location and index into FAISS with metadata."""
     file_path = tmp_path / filename
     img.save(file_path, format="PNG")
-    vec = np.random.randn(512).astype(np.float32)
+    vec = np.random.randn(get_embedding_dim()).astype(np.float32)
     meta = {
         "filename": filename,
         "path": str(file_path),
@@ -398,15 +404,8 @@ def test_discover_batches_api_endpoint(tmp_path, sample_skins):
     assert data["count"] <= 2
 
 
-def test_discover_adaptive_recall_with_eliminated_holes(tmp_path):
-    """Verify adaptive recall penetrates interleaved clusters with eliminated holes.
-
-    Constructs two distinct duplicate clusters (Skin A and Skin B) interleaved in the index.
-    After the first 2 batches consume and eliminate 10 items (5 of A, 5 of B), the remaining
-    10 items of Skin A reside behind these eliminated nodes.
-    The adaptive recall must expand its search window to bypass eliminated holes and
-    successfully discover all remaining clusters with zero omissions.
-    """
+def test_discover_adaptive_recall_with_eliminated_holes(tmp_path, monkeypatch):
+    """Verify adaptive recall expands k > discover_min_recall_k across >= 15 eliminated holes."""
     arr_a = np.zeros((64, 64, 4), dtype=np.uint8)
     arr_a[8:16, 8:24] = [200, 100, 50, 255]
     arr_a[:, :, 3] = 255
@@ -417,13 +416,24 @@ def test_discover_adaptive_recall_with_eliminated_holes(tmp_path):
     arr_b[:, :, 3] = 255
     img_b = Image.fromarray(arr_b, mode="RGBA")
 
-    # Interleaved index layout: A1 (5) -> B (5) -> A2 (10)
+    # Interleaved index layout: A1 (5) -> B (5) -> A2 (25); total A = 30 > min_recall_k (15).
+    # Once the first 15 A items (IDs 0..4, 10..19) are eliminated, top-15 recall holds 15 holes
+    # and k must expand past discover_min_recall_k=15 to recover the remaining A items.
     for i in range(5):
         _index_skin(img_a, f"cluster_a1_{i:02d}.png", tmp_path)
     for i in range(5):
         _index_skin(img_b, f"cluster_b_{i:02d}.png", tmp_path)
-    for i in range(10):
+    for i in range(25):
         _index_skin(img_a, f"cluster_a2_{i:02d}.png", tmp_path)
+
+    seen_ks: list[int] = []
+    orig_search_binary = indexer.search_binary
+
+    def _tracking_search_binary(hex_hash: str, k: int = 10, datasource: str = "skin"):
+        seen_ks.append(k)
+        return orig_search_binary(hex_hash, k=k, datasource=datasource)
+
+    monkeypatch.setattr(indexer, "search_binary", _tracking_search_binary)
 
     res = discover_similar_batches(
         datasource="skin",
@@ -432,8 +442,8 @@ def test_discover_adaptive_recall_with_eliminated_holes(tmp_path):
         mode="confirmed",
         seed_strategy="sequential",
     )
-    # Expected: 3 batches of A (15 items) and 1 batch of B (5 items) = 4 batches total
-    assert res["count"] == 4
+    # Expected: 6 batches of A (30 items) and 1 batch of B (5 items) = 7 batches total
+    assert res["count"] == 7
     discovered_fnames = set()
     for batch in res["batches"]:
         assert batch["size"] == 5
@@ -441,16 +451,56 @@ def test_discover_adaptive_recall_with_eliminated_holes(tmp_path):
         for member in batch["members"]:
             discovered_fnames.add(member["filename"])
 
-    assert len(discovered_fnames) == 20
-    assert res["stages"]["recall"]["candidates_recalled"] >= 20
+    assert len(discovered_fnames) == 35
+    assert any(k > settings.discover_min_recall_k for k in seen_ks), (
+        f"Expected adaptive recall k > {settings.discover_min_recall_k}, got {seen_ks}"
+    )
+
+
+def _find_hamming_variants(
+    base_arr: np.ndarray,
+    base_img: Image.Image,
+    targets: dict[int, int],
+    max_diff_ratio: float = 0.05,
+    seed: int = 7,
+) -> dict[int, list[Image.Image]]:
+    """Deterministically generate small-patch RGBA variants hitting exact pHash Hamming targets."""
+    verifier = DiffMaskVerifier()
+    base_phash = compute_phash(base_img)
+    base_int = int(base_phash, 16)
+    rng = np.random.default_rng(seed)
+    found: dict[int, list[Image.Image]] = {t: [] for t in targets}
+
+    for _ in range(10000):
+        cand = base_arr.copy()
+        for _ in range(int(rng.integers(1, 6))):
+            y, x = int(rng.integers(0, 44)), int(rng.integers(0, 60))
+            h, w = int(rng.integers(1, 6)), int(rng.integers(1, 6))
+            cand[y : y + h, x : x + w] = [
+                int(rng.integers(0, 256)),
+                int(rng.integers(0, 256)),
+                int(rng.integers(0, 256)),
+                255,
+            ]
+        img = Image.fromarray(cand, mode="RGBA")
+        hd = (base_int ^ int(compute_phash(img), 16)).bit_count()
+        if hd in targets and len(found[hd]) < targets[hd]:
+            dr = verifier.verify(base_img, img).diff_ratio
+            if dr <= max_diff_ratio:
+                found[hd].append(img)
+        if all(len(found[t]) >= targets[t] for t in targets):
+            return found
+
+    raise AssertionError(f"Could not find all exact Hamming targets {targets}: found {found}")
 
 
 def test_discover_hamming_boundary_and_ties(tmp_path):
-    """Verify Hamming threshold boundaries, tied distances, and K-window scaling.
+    """Verify Hamming threshold boundaries, tied distances, and full-batch pruning.
 
-    - Candidates with distance <= threshold (including exact boundary) are evaluated.
+    - Candidates with verified Hamming distance <= 4 (including exact boundary 4) are included.
     - Multiple candidates with tied distances are deterministically handled.
-    - Candidates exceeding the Hamming threshold (dist=8 > 4) are strictly pruned out.
+    - Candidate with diff_ratio <= 0.05 but Hamming distance 8 > 4 is strictly pruned out
+      even when batch_size=8 allows more peers (no early break masking the exclusion).
     - Verifies execution across a non-trivial dataset (> discover_min_recall_k = 15).
     """
     base = np.zeros((64, 64, 4), dtype=np.uint8)
@@ -460,28 +510,20 @@ def test_discover_hamming_boundary_and_ties(tmp_path):
     base_img = Image.fromarray(base, mode="RGBA")
     _index_skin(base_img, "seed_base.png", tmp_path)
 
-    # 1. Tied candidates at Hamming distance 2
-    cand_dist2_a = base.copy()
-    cand_dist2_a[40:41, 40:41] = [255, 255, 255, 255]
-    _index_skin(Image.fromarray(cand_dist2_a, mode="RGBA"), "cand_dist2_a.png", tmp_path)
+    variants = _find_hamming_variants(
+        base, base_img, targets={2: 2, 4: 2, 8: 1}, max_diff_ratio=0.05
+    )
 
-    cand_dist2_b = base.copy()
-    cand_dist2_b[40:42, 40:42] = [255, 255, 255, 255]
-    _index_skin(Image.fromarray(cand_dist2_b, mode="RGBA"), "cand_dist2_b.png", tmp_path)
+    # 1. Tied candidates at verified Hamming distance 2
+    _index_skin(variants[2][0], "cand_dist2_a.png", tmp_path)
+    _index_skin(variants[2][1], "cand_dist2_b.png", tmp_path)
 
-    # 2. Tied candidates at exact confirmed boundary (Hamming distance 4)
-    cand_dist4_a = base.copy()
-    cand_dist4_a[40:43, 40:43] = [255, 255, 255, 255]
-    _index_skin(Image.fromarray(cand_dist4_a, mode="RGBA"), "cand_dist4_a.png", tmp_path)
+    # 2. Tied candidates at exact confirmed boundary (verified Hamming distance 4)
+    _index_skin(variants[4][0], "cand_dist4_a.png", tmp_path)
+    _index_skin(variants[4][1], "cand_dist4_b.png", tmp_path)
 
-    cand_dist4_b = base.copy()
-    cand_dist4_b[40:44, 40:44] = [255, 255, 255, 255]
-    _index_skin(Image.fromarray(cand_dist4_b, mode="RGBA"), "cand_dist4_b.png", tmp_path)
-
-    # 3. Candidate strictly exceeding confirmed boundary (Hamming distance 8 > 4)
-    cand_dist8_out = base.copy()
-    cand_dist8_out[40:45, 40:45] = [255, 255, 255, 255]
-    _index_skin(Image.fromarray(cand_dist8_out, mode="RGBA"), "cand_dist8_out.png", tmp_path)
+    # 3. Candidate with diff_ratio <= 0.05 yet verified Hamming distance 8 > 4
+    _index_skin(variants[8][0], "cand_dist8_out.png", tmp_path)
 
     # 4. Add 15 filler noise images so total_items = 21 > discover_min_recall_k = 15
     for i in range(15):
@@ -492,12 +534,14 @@ def test_discover_hamming_boundary_and_ties(tmp_path):
     res = discover_similar_batches(
         datasource="skin",
         max_batches=1,
-        batch_size=5,
+        batch_size=8,
         mode="confirmed",
         seed_strategy="sequential",
     )
     assert res["count"] == 1
     batch = res["batches"][0]
+    assert batch["seed"]["filename"] == "seed_base.png"
+    assert batch["size"] == 5
     members = {batch["seed"]["filename"]} | {m["filename"] for m in batch["members"]}
 
     # Boundary and tied candidates must be included
@@ -505,7 +549,7 @@ def test_discover_hamming_boundary_and_ties(tmp_path):
     assert "cand_dist2_b.png" in members
     assert "cand_dist4_a.png" in members
     assert "cand_dist4_b.png" in members
-    # Exceeded candidate and noise skins must be pruned
+    # Exceeded candidate and noise skins must be pruned even with batch_size=8
     assert "cand_dist8_out.png" not in members
     for i in range(15):
         assert f"noise_{i:02d}.png" not in members

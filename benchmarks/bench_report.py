@@ -8,9 +8,13 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from collections import defaultdict
+from typing import Any
+
+import numpy as np
 
 
 def _fmt_mb(mb: float) -> str:
@@ -63,6 +67,7 @@ def _group_name(name: str) -> str:
     # test_bench_faiss_flat_search_1k → faiss
     # test_bench_hash_dhash_single → hash
     mapping = {
+        "cluster": "cluster",
         "clip": "clip",
         "faiss": "faiss",
         "ivfpq": "faiss",
@@ -90,10 +95,110 @@ def _short_name(name: str) -> str:
     return name.replace("test_bench_", "")
 
 
-def _load_json(path: str) -> dict:
+def _load_json(path: str) -> dict[str, Any]:
     """Load a pytest-benchmark JSON file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _stats_median(stats: dict[str, Any]) -> float:
+    """Return median seconds from pytest-benchmark stats."""
+    if stats.get("median") is not None:
+        return float(stats["median"])
+    data = stats.get("data") or []
+    return float(np.median(data)) if data else float(stats.get("mean", 0.0))
+
+
+def _stats_p95(stats: dict[str, Any]) -> float:
+    """Return P95 seconds from pytest-benchmark raw round samples."""
+    data = stats.get("data") or []
+    if data:
+        return float(np.percentile(data, 95))
+    return float(stats.get("max", stats.get("mean", 0.0)))
+
+
+def _machine_os_label(machine: dict[str, Any]) -> str:
+    sys_name = str(machine.get("system") or "").strip()
+    os_val = machine.get("os")
+    distro = str(os_val.get("distro") or "").strip() if isinstance(os_val, dict) else ""
+    return distro or sys_name
+
+
+def evaluate_regression(
+    results: dict[str, Any],
+    baseline: dict[str, Any],
+    fail_threshold: float,
+    allow_cross_env: bool = False,
+) -> list[str]:
+    """Evaluate median & p95 regression and environment compatibility against baseline.
+
+    Returns a list of error strings (empty means regression gate passed).
+    """
+    errors: list[str] = []
+    if fail_threshold < 0:
+        return [f"fail_threshold must be non-negative, got {fail_threshold}"]
+
+    res_benchmarks = results.get("benchmarks") or []
+    bl_benchmarks = baseline.get("benchmarks") or []
+    if not res_benchmarks:
+        return ["Current benchmark results contain no benchmarks."]
+    if not bl_benchmarks:
+        return ["Baseline file contains no benchmarks."]
+
+    res_machine = results.get("machine_info") or {}
+    bl_machine = baseline.get("machine_info") or {}
+    res_sys = str(res_machine.get("system") or "").strip()
+    bl_sys = str(bl_machine.get("system") or "").strip()
+    res_cpu = str((res_machine.get("cpu") or {}).get("brand_raw") or "").strip()
+    bl_cpu = str((bl_machine.get("cpu") or {}).get("brand_raw") or "").strip()
+
+    env_mismatches: list[str] = []
+    if res_sys and bl_sys and res_sys != bl_sys:
+        env_mismatches.append(f"OS mismatch ({bl_sys} vs {res_sys})")
+    if res_cpu and bl_cpu and res_cpu != bl_cpu:
+        env_mismatches.append(f"CPU mismatch ({bl_cpu!r} vs {res_cpu!r})")
+    if env_mismatches:
+        msg = "Environment mismatch vs baseline: " + "; ".join(env_mismatches)
+        if allow_cross_env:
+            print(f"WARNING: {msg} (ignored due to --allow-cross-env)")
+        else:
+            errors.append(msg + " (pass --allow-cross-env to override)")
+
+    res_lookup = {bm["name"]: bm for bm in res_benchmarks}
+    bl_lookup = {bm["name"]: bm for bm in bl_benchmarks}
+
+    for bl_name in sorted(bl_lookup):
+        if bl_name not in res_lookup:
+            errors.append(f"Missing baseline benchmark in current run: {bl_name}")
+
+    for name, bm in res_lookup.items():
+        if name not in bl_lookup:
+            continue
+        stats = bm["stats"]
+        bl_stats = bl_lookup[name]["stats"]
+
+        med = _stats_median(stats)
+        bl_med = _stats_median(bl_stats)
+        p95 = _stats_p95(stats)
+        bl_p95 = _stats_p95(bl_stats)
+
+        if bl_med > 0:
+            med_delta = (med - bl_med) / bl_med * 100.0
+            if med_delta > fail_threshold:
+                errors.append(
+                    f"Median regression > {fail_threshold:.1f}% on {name}: "
+                    f"{_fmt_ms(bl_med)} -> {_fmt_ms(med)} ({med_delta:+.1f}%)"
+                )
+
+        if bl_p95 > 0:
+            p95_delta = (p95 - bl_p95) / bl_p95 * 100.0
+            if p95_delta > fail_threshold:
+                errors.append(
+                    f"P95 regression > {fail_threshold:.1f}% on {name}: "
+                    f"{_fmt_ms(bl_p95)} -> {_fmt_ms(p95)} ({p95_delta:+.1f}%)"
+                )
+
+    return errors
 
 
 def _print_system_header(machine: dict) -> None:
@@ -246,7 +351,7 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
     _print_system_header(machine)
 
     # Group display order
-    group_order = ["clip", "faiss", "hash", "ssim", "pipeline", "indexing", "io"]
+    group_order = ["cluster", "clip", "faiss", "hash", "ssim", "pipeline", "indexing", "io"]
 
     for group_key in group_order:
         if group_key not in groups:
@@ -254,6 +359,7 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
 
         group_benchmarks = groups[group_key]
         group_title = {
+            "cluster": "Cluster Discovery",
             "clip": "CLIP Encoding",
             "faiss": "Faiss Index",
             "hash": "Perceptual Hashing",
@@ -265,15 +371,23 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
 
         print(f"  ── {group_title} ──")
         hdr = (
-            f"  {'Benchmark':<48} {'Mean':>10} {'Min':>10} {'Max':>10}  "
+            f"  {'Benchmark':<44} {'Median':>9} {'P95':>9} {'Mean':>9} {'Min':>9} {'Max':>9}  "
             f"{'Mem (Peak)':>22}  {'Rounds':>6}"
         )
         print(hdr)
-        print(f"  {'─' * 48} {'─' * 10} {'─' * 10} {'─' * 10}  {'─' * 22}  {'─' * 6}")
+        print(
+            f"  {'─' * 44} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 9}  "
+            f"{'─' * 22}  {'─' * 6}"
+        )
 
         for bm in group_benchmarks:
-            name = _short_name(bm["name"])
+            full_name = bm["name"]
+            name = _short_name(full_name)
             stats = bm["stats"]
+            med = _stats_median(stats)
+            p95 = _stats_p95(stats)
+            med_str = _fmt_ms(med)
+            p95_str = _fmt_ms(p95)
             mean_str = _fmt_ms(stats["mean"])
             min_str = _fmt_ms(stats["min"])
             max_str = _fmt_ms(stats["max"])
@@ -288,15 +402,18 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
 
             # Show regression if baseline available
             reg_str = ""
-            if name in baseline_lookup:
-                bl_mean = baseline_lookup[name]["stats"]["mean"]
-                delta = (stats["mean"] - bl_mean) / bl_mean * 100
-                if abs(delta) > 5:
-                    arrow = "▲" if delta > 0 else "▼"
-                    reg_str = f"  {arrow} {delta:+.1f}%"
+            if full_name in baseline_lookup:
+                bl_stats = baseline_lookup[full_name]["stats"]
+                bl_med = _stats_median(bl_stats)
+                bl_p95 = _stats_p95(bl_stats)
+                med_delta = ((med - bl_med) / bl_med * 100) if bl_med > 0 else 0.0
+                p95_delta = ((p95 - bl_p95) / bl_p95 * 100) if bl_p95 > 0 else 0.0
+                if abs(med_delta) > 5 or abs(p95_delta) > 5:
+                    arrow = "▲" if max(med_delta, p95_delta) > 0 else "▼"
+                    reg_str = f"  {arrow} med:{med_delta:+.1f}% p95:{p95_delta:+.1f}%"
 
             print(
-                f"  {name:<48} {mean_str:>10} {min_str:>10} {max_str:>10}  "
+                f"  {name:<44} {med_str:>9} {p95_str:>9} {mean_str:>9} {min_str:>9} {max_str:>9}  "
                 f"{mem_str:>22}  {rounds:>6}{reg_str}"
             )
 
@@ -327,21 +444,53 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
     print()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <bench_results.json> [--compare baseline.json]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Format pytest-benchmark JSON and optionally enforce median/p95 regression gate."
+        )
+    )
+    parser.add_argument("results_json", help="Path to pytest-benchmark JSON results")
+    parser.add_argument("--compare", type=str, default=None, help="Path to baseline JSON file")
+    parser.add_argument(
+        "--fail-threshold",
+        type=float,
+        default=None,
+        help="Fail with non-zero exit code if median or p95 regresses more than PCT%% vs baseline",
+    )
+    parser.add_argument(
+        "--allow-cross-env",
+        action="store_true",
+        help="Allow comparison against a baseline captured on a different OS or CPU",
+    )
+    args = parser.parse_args(argv)
 
-    results_path = sys.argv[1]
-    baseline = None
-
-    if len(sys.argv) > 2 and sys.argv[2] == "--compare":
-        baseline = _load_json(sys.argv[3])
-
-    results = _load_json(results_path)
+    results = _load_json(args.results_json)
+    baseline = _load_json(args.compare) if args.compare else None
     print_report(results, baseline)
+
+    if args.fail_threshold is not None:
+        if baseline is None:
+            print("ERROR: --fail-threshold requires --compare <baseline.json>", file=sys.stderr)
+            return 2
+        errors = evaluate_regression(
+            results,
+            baseline,
+            fail_threshold=args.fail_threshold,
+            allow_cross_env=args.allow_cross_env,
+        )
+        if errors:
+            print("REGRESSION GATE FAILED:", file=sys.stderr)
+            for err in errors:
+                print(f"  - {err}", file=sys.stderr)
+            return 1
+        print(
+            f"REGRESSION GATE PASSED (median & p95 within +{args.fail_threshold:.1f}% vs baseline)."
+        )
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
