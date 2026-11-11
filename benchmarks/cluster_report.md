@@ -7,52 +7,77 @@
 
 | Parameter | Value |
 | :--- | :--- |
-| **Commit SHA** | `49f7de9` |
+| **Generated At** | `2026-11-11T12:03:16+08:00` |
+| **Commit SHA** | `c393ffe (clean)` |
+| **Source Digest (SHA-256)** | `ab0b74e9718c83ae` |
 | **Python** | `3.12.11` |
 | **OS Platform** | `Windows 11 (AMD64)` |
-| **CPU** | `AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD` |
-| **Faiss** | `1.15.0` |
-| **Pillow** | `12.3.0` |
-| **PRNG Seed** | `42 (Deterministic)` |
+| **CPU** | `AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD (16 logical cores)` |
+| **GPU** | `NVIDIA GeForce RTX 3060 Laptop GPU (6.0 GB)` |
+| **Torch / Faiss / Pillow** | `2.6.0+cu124 / 1.15.0 / 12.3.0` |
+| **Statistical Rounds** | `5` |
+| **Haystack Config** | `samples=200, use_zip=True` |
+| **images.zip Fingerprint** | `5,412,351,199 bytes | 664,633 PNGs | sha256=fb75e5017085aa5b0f951a2f26b6a3a4b5149f8d63cdb347c92676e67ca5d6fe` |
+| **Confirmed Thresholds** | `hamming <= 4, diff_ratio <= 0.05` |
+| **Variants Thresholds** | `hamming <= 12, diff_ratio <= 0.35` |
+| **Recall Window** | `min_k=15, multiplier=3` |
 
 ## 🏆 Executive Summary & Strategy Matrix
 
-> **Note on Latencies & Rates**: `Latency` reflects Wall-clock Median (P95) over multiple statistical rounds. Throughput (`prob/s`) uses `end_to_end_ms` as the strict rate denominator.
+> **Note on Latencies & Rates**: `Latency` reports `Median (P95) [Min - Max]` wall-clock ms over `Statistical Rounds`. Throughput (`prob/s`) uses `end_to_end_ms` as the strict denominator. `Coverage` counts all recovered GT cluster members (seeds + peers).
 
-| Scenario | Mode | Scale (Items/GT) | Wall Latency (Med/P95) | Throughput | Formed Batches | Purity | Coverage | Recall |
+| Scenario | Mode | Scale (Items/GT) | Wall Latency Med/P95 [Min-Max] | Throughput | Formed Batches | Purity (Wrong) | Coverage | Recall |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Exact Duplicate Swarms** | `confirmed` | 105 / 3 | **224.6ms** (244.3ms) | 276 prob/s | 13 batches (56 skins) | **100.0%** | 69.4% | **100.0%** |
-| **Massive 50-Skin Duplicate Swarm** | `confirmed` | 70 / 1 | **120.3ms** (121.8ms) | 249 prob/s | 10 batches (50 skins) | **100.0%** | 81.6% | **100.0%** |
-| **Derivative Variant Clusters** | `variants` | 70 / 5 | **195.0ms** (220.7ms) | 231 prob/s | 17 batches (42 skins) | **60.0%** | 32.0% | **80.0%** |
-| **Sparse Real Haystack (Confirmed)** | `confirmed` | 245 / 10 | **133.9ms** (727.9ms) | 1,493 prob/s | 10 batches (25 skins) | **100.0%** | 100.0% | **100.0%** |
-| **Sparse Real Haystack (Variants)** | `variants` | 245 / 5 | **599.4ms** (1322.8ms) | 334 prob/s | 16 batches (47 skins) | **96.9%** | 100.0% | **100.0%** |
-| **Sequential Seed Strategy** | `confirmed` | 245 / 10 | **109.4ms** (111.1ms) | 1,828 prob/s | 10 batches (25 skins) | **100.0%** | 100.0% | **100.0%** |
-| **Threshold Boundary Gating** | `confirmed` | 4 / 1 | **9.1ms** (9.8ms) | 329 prob/s | 1 batches (2 skins) | **100.0%** | 100.0% | **100.0%** |
-| **Anti-Transitivity Elimination** | `variants` | 3 / 1 | **4.5ms** (5.4ms) | 442 prob/s | 1 batches (2 skins) | **100.0%** | 100.0% | **100.0%** |
+| **Exact Duplicate Swarms** | `confirmed` | 105 / 3 | **64.5ms** (66.5ms) [61.6-66.8] | 822 prob/s | 13 batches (65 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Massive 50-Skin Duplicate Swarm** | `confirmed` | 70 / 1 | **50.8ms** (62.5ms) [47.9-65.2] | 590 prob/s | 10 batches (50 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Derivative Variant Clusters** | `variants` | 70 / 5 | **52.2ms** (56.9ms) [46.1-57.8] | 958 prob/s | 5 batches (25 skins) | **100.0%** (0) | 83.3% | **100.0%** |
+| **Sparse Real Haystack (Confirmed)** | `confirmed` | 245 / 10 | **54.9ms** (55.2ms) [51.4-55.3] | 3,642 prob/s | 10 batches (25 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Sparse Real Haystack (Variants)** | `variants` | 245 / 5 | **314.8ms** (337.1ms) [303.7-338.2] | 635 prob/s | 16 batches (47 skins) | **93.8%** (1) | 100.0% | **100.0%** |
+| **Sequential Seed Strategy** | `confirmed` | 245 / 10 | **55.8ms** (61.5ms) [52.4-61.8] | 3,583 prob/s | 10 batches (25 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Threshold Boundary Gating (Confirmed)** | `confirmed` | 8 / 2 | **7.5ms** (9.3ms) [6.9-9.6] | 668 prob/s | 2 batches (5 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Threshold Boundary Gating (Variants)** | `variants` | 6 / 2 | **5.3ms** (8.1ms) [4.6-8.8] | 748 prob/s | 2 batches (4 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Anti-Transitivity Elimination** | `variants` | 3 / 1 | **3.4ms** (3.9ms) [3.0-4.0] | 593 prob/s | 1 batches (2 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+| **Adversarial Torture Suite** | `confirmed` | 13 / 3 | **14.0ms** (16.2ms) [12.7-16.4] | 716 prob/s | 3 batches (6 skins) | **100.0%** (0) | 100.0% | **100.0%** |
+
+## 🔧 Scenario Reproducibility Matrix
+
+| Scenario | Dataset Seed | PRNG Seed | Seed Strategy | batch_size | max_batches | max_probes |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `Exact Duplicate Swarms` | `101` | `42` | `random` | 5 | 50 | 200 |
+| `Massive 50-Skin Duplicate Swarm` | `102` | `42` | `sequential` | 5 | 50 | 200 |
+| `Derivative Variant Clusters` | `201` | `42` | `random` | 5 | 30 | 200 |
+| `Sparse Real Haystack (Confirmed)` | `301` | `42` | `random` | 5 | 30 | 200 |
+| `Sparse Real Haystack (Variants)` | `301` | `42` | `random` | 5 | 30 | 200 |
+| `Sequential Seed Strategy` | `301` | `42` | `sequential` | 5 | 30 | 200 |
+| `Threshold Boundary Gating (Confirmed)` | `401` | `42` | `sequential` | 5 | 5 | 200 |
+| `Threshold Boundary Gating (Variants)` | `401` | `42` | `sequential` | 5 | 5 | 200 |
+| `Anti-Transitivity Elimination` | `501` | `42` | `sequential` | 5 | 5 | 200 |
+| `Adversarial Torture Suite` | `600` | `42` | `random` | 5 | 10 | 200 |
 
 ## 🔬 Telemetry & Fine-Grained Latency Decomposition
 
-> **Decomposition**: `service_query_ms` = `instrumented_stage_ms` (`recall` + `io` + `verify`) + `unattributed_ms` (dynamic elimination loop overhead & metadata retrieval).
+> **Decomposition**: `end_to_end_ms` = `instrumented_stage_ms` (`recall` + `io` + `verify`) + `unattributed_ms` (loop branching, metadata lookups, elimination, harness overhead); `service_query_ms` records internal `discover_similar_batches()` elapsed time.
 
-| Scenario | Service / Wall | Binary Recall | Parallel I/O | DiffMask Verify | Loop Overhead | Verified Pairs |
+| Scenario | Service / Wall | Binary Recall | Parallel I/O | DiffMask Verify | Unattributed (e2e) | Verified Pairs |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `Exact Duplicate Swarms` | 224.2ms / 224.6ms | 20.3ms (10.2%) | 64.7ms (32.6%) | 113.5ms (57.2%) | 25.7ms | 446 (1,986 pairs/s) |
-| `Massive 50-Skin Duplicate Swarm` | 120.0ms / 120.3ms | 9.7ms (9.2%) | 41.0ms (38.9%) | 54.6ms (51.8%) | 14.7ms | 207 (1,720 pairs/s) |
-| `Derivative Variant Clusters` | 194.5ms / 195.0ms | 28.1ms (16.1%) | 58.7ms (33.6%) | 88.1ms (50.4%) | 19.6ms | 326 (1,672 pairs/s) |
-| `Sparse Real Haystack (Confirmed)` | 133.6ms / 133.9ms | 31.1ms (27.0%) | 60.1ms (52.1%) | 24.2ms (20.9%) | 18.2ms | 68 (508 pairs/s) |
-| `Sparse Real Haystack (Variants)` | 598.9ms / 599.4ms | 50.8ms (9.3%) | 215.9ms (39.4%) | 280.7ms (51.3%) | 51.6ms | 949 (1,583 pairs/s) |
-| `Sequential Seed Strategy` | 109.1ms / 109.4ms | 24.5ms (26.0%) | 49.5ms (52.6%) | 20.1ms (21.3%) | 15.1ms | 68 (621 pairs/s) |
-| `Threshold Boundary Gating` | 8.9ms / 9.1ms | 2.3ms (28.7%) | 4.8ms (59.4%) | 1.0ms (11.9%) | 0.8ms | 4 (438 pairs/s) |
-| `Anti-Transitivity Elimination` | 4.3ms / 4.5ms | 0.4ms (10.8%) | 2.7ms (71.2%) | 0.7ms (18.1%) | 0.6ms | 2 (442 pairs/s) |
+| `Exact Duplicate Swarms` | 64.2ms / 64.5ms | 3.3ms (6.0%) | 37.8ms (70.0%) | 12.9ms (23.9%) | 10.5ms | 52 (806 pairs/s) |
+| `Massive 50-Skin Duplicate Swarm` | 50.5ms / 50.8ms | 1.3ms (3.0%) | 30.0ms (72.0%) | 10.4ms (25.0%) | 9.2ms | 40 (787 pairs/s) |
+| `Derivative Variant Clusters` | 51.8ms / 52.2ms | 1.6ms (3.7%) | 32.4ms (75.4%) | 9.0ms (20.8%) | 9.2ms | 31 (594 pairs/s) |
+| `Sparse Real Haystack (Confirmed)` | 54.6ms / 54.9ms | 2.9ms (6.3%) | 33.1ms (70.8%) | 10.7ms (22.9%) | 8.2ms | 68 (1,238 pairs/s) |
+| `Sparse Real Haystack (Variants)` | 314.2ms / 314.8ms | 7.0ms (2.5%) | 118.2ms (42.1%) | 155.3ms (55.4%) | 34.3ms | 949 (3,014 pairs/s) |
+| `Sequential Seed Strategy` | 55.6ms / 55.8ms | 3.0ms (6.3%) | 33.3ms (70.3%) | 11.1ms (23.5%) | 8.4ms | 68 (1,218 pairs/s) |
+| `Threshold Boundary Gating (Confirmed)` | 7.3ms / 7.5ms | 0.2ms (2.5%) | 5.0ms (79.1%) | 1.2ms (18.4%) | 1.1ms | 6 (802 pairs/s) |
+| `Threshold Boundary Gating (Variants)` | 5.2ms / 5.3ms | 0.1ms (2.9%) | 3.8ms (82.6%) | 0.7ms (14.5%) | 0.8ms | 3 (561 pairs/s) |
+| `Anti-Transitivity Elimination` | 3.2ms / 3.4ms | 0.1ms (2.4%) | 2.4ms (82.9%) | 0.4ms (14.6%) | 0.5ms | 2 (593 pairs/s) |
+| `Adversarial Torture Suite` | 13.8ms / 14.0ms | 0.5ms (4.2%) | 8.7ms (75.4%) | 2.4ms (20.4%) | 2.4ms | 7 (501 pairs/s) |
 
 ## ⚖️ Algorithmic Trade-offs & Variants Mode Honest Disclosure
 
 > [!IMPORTANT]
 > **Variants Mode Trade-off Disclosure**:
-> In `mode='variants'`, search constraints are intentionally relaxed to Hamming $\le 12$ and DiffMask $\le 0.35$ > in order to discover derivative community recolors, minor clothing modifications, and edit series.
-> When exposed to hundreds of arbitrary community background distractors, cluster purity naturally settles at **~56% ~ 68%**.
-> This is a deliberate, mathematically sound engineering trade-off: **trading single-pass precision to maximize recall on loose artistic variants**.
-> Clustering suggestions generated under `variants` mode are intended for human review workflows and must never trigger unsupervised destructive deduplication.
+> In `mode='variants'`, search constraints are relaxed to Hamming $\le 12$ and DiffMask $\le 0.35$ to discover derivative community recolors, minor clothing modifications, and edit series.
+> When exposed to arbitrary community skins (`Sparse Real Haystack (Variants)`), unlabeled background lookalikes may join discovered batches (see measured `Purity` and `Wrong` counts in the matrix above).
+> This reflects a deliberate recall-vs-precision engineering trade-off: clustering suggestions under `variants` mode are intended for human review workflows rather than unsupervised deletion.
 
 ---
 
@@ -60,120 +85,150 @@
 
 ### Scenario: Exact Duplicate Swarms (`mode=confirmed`)
 - **Dataset Scale**: 105 items (3 GT clusters)
-- **Wall-Clock Latency**: **224.55 ms** (service internal: 224.19 ms) | **276.1 Probes/sec** (denominator: end_to_end_ms)
-- **Batches Formed**: 13 (covering 56 skins)
+- **Wall-Clock Latency**: **64.51 ms** (service internal: 64.17 ms) | **821.5 Probes/sec** (denominator: end_to_end_ms)
+- **Batches Formed**: 13 (covering 65 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
   - **Target Group Recall**: **100.0%** (3 ground-truth groups)
-  - **Member Coverage**: **69.4%** (fraction of non-seed GT cluster members recovered)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
   - **Max Observed DiffRatio**: 0.0000 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 20.28 ms (10.2%) | 491 candidates recalled
-  - **Parallel Image I/O**: 64.69 ms (32.6%) | 105 images decoded in thread pool
-  - **DiffMask Verify**: 113.52 ms (57.2%) | 446 pairs verified (1,986.2 pairs/sec)
-  - **Unattributed Loop Overhead**: 25.70 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 3.27 ms (6.0%) | 115 candidates recalled
+  - **Parallel Image I/O**: 37.80 ms (70.0%) | 65 images decoded in thread pool
+  - **DiffMask Verify**: 12.93 ms (23.9%) | 52 pairs verified (806.0 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 10.52 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
 ### Scenario: Massive 50-Skin Duplicate Swarm (`mode=confirmed`)
 - **Dataset Scale**: 70 items (1 GT clusters)
-- **Wall-Clock Latency**: **120.33 ms** (service internal: 120.00 ms) | **249.3 Probes/sec** (denominator: end_to_end_ms)
+- **Wall-Clock Latency**: **50.82 ms** (service internal: 50.47 ms) | **590.3 Probes/sec** (denominator: end_to_end_ms)
 - **Batches Formed**: 10 (covering 50 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
   - **Target Group Recall**: **100.0%** (1 ground-truth groups)
-  - **Member Coverage**: **81.6%** (fraction of non-seed GT cluster members recovered)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
   - **Max Observed DiffRatio**: 0.0000 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 9.72 ms (9.2%) | 274 candidates recalled
-  - **Parallel Image I/O**: 41.01 ms (38.9%) | 70 images decoded in thread pool
-  - **DiffMask Verify**: 54.57 ms (51.8%) | 207 pairs verified (1,720.2 pairs/sec)
-  - **Unattributed Loop Overhead**: 14.70 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 1.25 ms (3.0%) | 103 candidates recalled
+  - **Parallel Image I/O**: 29.97 ms (72.0%) | 50 images decoded in thread pool
+  - **DiffMask Verify**: 10.41 ms (25.0%) | 40 pairs verified (787.1 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 9.18 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
 ### Scenario: Derivative Variant Clusters (`mode=variants`)
 - **Dataset Scale**: 70 items (5 GT clusters)
-- **Wall-Clock Latency**: **194.97 ms** (service internal: 194.50 ms) | **230.8 Probes/sec** (denominator: end_to_end_ms)
-- **Batches Formed**: 17 (covering 42 skins)
+- **Wall-Clock Latency**: **52.17 ms** (service internal: 51.82 ms) | **958.5 Probes/sec** (denominator: end_to_end_ms)
+- **Batches Formed**: 5 (covering 25 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **60.0%** (100% pure batches: 23.5%, impure batches: 13)
-  - **Target Group Recall**: **80.0%** (5 ground-truth groups)
-  - **Member Coverage**: **32.0%** (fraction of non-seed GT cluster members recovered)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
+  - **Target Group Recall**: **100.0%** (5 ground-truth groups)
+  - **Member Coverage**: **83.3%** (fraction of target GT cluster members—including seeds and peers—recovered)
   - **Max Observed DiffRatio**: 0.3477 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 28.08 ms (16.1%) | 331 candidates recalled
-  - **Parallel Image I/O**: 58.73 ms (33.6%) | 70 images decoded in thread pool
-  - **DiffMask Verify**: 88.05 ms (50.4%) | 326 pairs verified (1,672.1 pairs/sec)
-  - **Unattributed Loop Overhead**: 19.64 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 1.60 ms (3.7%) | 35 candidates recalled
+  - **Parallel Image I/O**: 32.39 ms (75.4%) | 41 images decoded in thread pool
+  - **DiffMask Verify**: 8.95 ms (20.8%) | 31 pairs verified (594.2 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 9.23 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
 ### Scenario: Sparse Real Haystack (Confirmed) (`mode=confirmed`)
 - **Dataset Scale**: 245 items (10 GT clusters)
-- **Wall-Clock Latency**: **133.94 ms** (service internal: 133.60 ms) | **1,493.2 Probes/sec** (denominator: end_to_end_ms)
+- **Wall-Clock Latency**: **54.91 ms** (service internal: 54.65 ms) | **3,642.0 Probes/sec** (denominator: end_to_end_ms)
 - **Batches Formed**: 10 (covering 25 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
   - **Target Group Recall**: **100.0%** (10 ground-truth groups)
-  - **Member Coverage**: **100.0%** (fraction of non-seed GT cluster members recovered)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
   - **Max Observed DiffRatio**: 0.0000 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 31.15 ms (27.0%) | 68 candidates recalled
-  - **Parallel Image I/O**: 60.09 ms (52.1%) | 60 images decoded in thread pool
-  - **DiffMask Verify**: 24.16 ms (20.9%) | 68 pairs verified (507.7 pairs/sec)
-  - **Unattributed Loop Overhead**: 18.19 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 2.92 ms (6.3%) | 68 candidates recalled
+  - **Parallel Image I/O**: 33.07 ms (70.8%) | 60 images decoded in thread pool
+  - **DiffMask Verify**: 10.69 ms (22.9%) | 68 pairs verified (1,238.3 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 8.24 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
 ### Scenario: Sparse Real Haystack (Variants) (`mode=variants`)
 - **Dataset Scale**: 245 items (5 GT clusters)
-- **Wall-Clock Latency**: **599.42 ms** (service internal: 598.93 ms) | **333.7 Probes/sec** (denominator: end_to_end_ms)
+- **Wall-Clock Latency**: **314.83 ms** (service internal: 314.16 ms) | **635.3 Probes/sec** (denominator: end_to_end_ms)
 - **Batches Formed**: 16 (covering 47 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **96.9%** (100% pure batches: 93.8%, impure batches: 1)
+  - **Cluster Purity**: **93.8%** (100% pure batches: 93.8%, impure batches: 1, wrong peers: 1)
   - **Target Group Recall**: **100.0%** (5 ground-truth groups)
-  - **Member Coverage**: **100.0%** (fraction of non-seed GT cluster members recovered)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
   - **Max Observed DiffRatio**: 0.3481 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 50.80 ms (9.3%) | 949 candidates recalled
-  - **Parallel Image I/O**: 215.87 ms (39.4%) | 208 images decoded in thread pool
-  - **DiffMask Verify**: 280.71 ms (51.3%) | 949 pairs verified (1,583.2 pairs/sec)
-  - **Unattributed Loop Overhead**: 51.55 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 7.00 ms (2.5%) | 949 candidates recalled
+  - **Parallel Image I/O**: 118.23 ms (42.1%) | 208 images decoded in thread pool
+  - **DiffMask Verify**: 155.32 ms (55.4%) | 949 pairs verified (3,014.3 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 34.28 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
 ### Scenario: Sequential Seed Strategy (`mode=confirmed`)
 - **Dataset Scale**: 245 items (10 GT clusters)
-- **Wall-Clock Latency**: **109.42 ms** (service internal: 109.13 ms) | **1,827.9 Probes/sec** (denominator: end_to_end_ms)
+- **Wall-Clock Latency**: **55.83 ms** (service internal: 55.56 ms) | **3,582.5 Probes/sec** (denominator: end_to_end_ms)
 - **Batches Formed**: 10 (covering 25 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
   - **Target Group Recall**: **100.0%** (10 ground-truth groups)
-  - **Member Coverage**: **100.0%** (fraction of non-seed GT cluster members recovered)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
   - **Max Observed DiffRatio**: 0.0000 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 24.48 ms (26.0%) | 68 candidates recalled
-  - **Parallel Image I/O**: 49.49 ms (52.6%) | 60 images decoded in thread pool
-  - **DiffMask Verify**: 20.06 ms (21.3%) | 68 pairs verified (621.5 pairs/sec)
-  - **Unattributed Loop Overhead**: 15.10 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 2.97 ms (6.3%) | 68 candidates recalled
+  - **Parallel Image I/O**: 33.33 ms (70.3%) | 60 images decoded in thread pool
+  - **DiffMask Verify**: 11.13 ms (23.5%) | 68 pairs verified (1,218.1 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 8.40 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
-### Scenario: Threshold Boundary Gating (`mode=confirmed`)
-- **Dataset Scale**: 4 items (1 GT clusters)
-- **Wall-Clock Latency**: **9.12 ms** (service internal: 8.94 ms) | **328.8 Probes/sec** (denominator: end_to_end_ms)
-- **Batches Formed**: 1 (covering 2 skins)
+### Scenario: Threshold Boundary Gating (Confirmed) (`mode=confirmed`)
+- **Dataset Scale**: 8 items (2 GT clusters)
+- **Wall-Clock Latency**: **7.48 ms** (service internal: 7.32 ms) | **668.3 Probes/sec** (denominator: end_to_end_ms)
+- **Batches Formed**: 2 (covering 5 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0)
-  - **Target Group Recall**: **100.0%** (1 ground-truth groups)
-  - **Member Coverage**: **100.0%** (fraction of non-seed GT cluster members recovered)
-  - **Max Observed DiffRatio**: 0.0449 (strictly within configured limits)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
+  - **Target Group Recall**: **100.0%** (2 ground-truth groups)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
+  - **Max Observed DiffRatio**: 0.0500 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 2.33 ms (28.7%) | 4 candidates recalled
-  - **Parallel Image I/O**: 4.82 ms (59.4%) | 4 images decoded in thread pool
-  - **DiffMask Verify**: 0.96 ms (11.9%) | 4 pairs verified (438.4 pairs/sec)
-  - **Unattributed Loop Overhead**: 0.82 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 0.16 ms (2.5%) | 6 candidates recalled
+  - **Parallel Image I/O**: 5.04 ms (79.1%) | 7 images decoded in thread pool
+  - **DiffMask Verify**: 1.17 ms (18.4%) | 6 pairs verified (802.0 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 1.12 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
+
+### Scenario: Threshold Boundary Gating (Variants) (`mode=variants`)
+- **Dataset Scale**: 6 items (2 GT clusters)
+- **Wall-Clock Latency**: **5.35 ms** (service internal: 5.21 ms) | **748.0 Probes/sec** (denominator: end_to_end_ms)
+- **Batches Formed**: 2 (covering 4 skins)
+- **Clustering Quality & Precision**:
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
+  - **Target Group Recall**: **100.0%** (2 ground-truth groups)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
+  - **Max Observed DiffRatio**: 0.3500 (strictly within configured limits)
+- **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
+  - **Binary Recall**: 0.13 ms (2.9%) | 3 candidates recalled
+  - **Parallel Image I/O**: 3.75 ms (82.6%) | 5 images decoded in thread pool
+  - **DiffMask Verify**: 0.66 ms (14.5%) | 3 pairs verified (561.0 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 0.81 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
 
 ### Scenario: Anti-Transitivity Elimination (`mode=variants`)
 - **Dataset Scale**: 3 items (1 GT clusters)
-- **Wall-Clock Latency**: **4.53 ms** (service internal: 4.32 ms) | **441.7 Probes/sec** (denominator: end_to_end_ms)
+- **Wall-Clock Latency**: **3.37 ms** (service internal: 3.22 ms) | **593.2 Probes/sec** (denominator: end_to_end_ms)
 - **Batches Formed**: 1 (covering 2 skins)
 - **Clustering Quality & Precision**:
-  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0)
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
   - **Target Group Recall**: **100.0%** (1 ground-truth groups)
-  - **Member Coverage**: **100.0%** (fraction of non-seed GT cluster members recovered)
-  - **Max Observed DiffRatio**: 0.1797 (strictly within configured limits)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
+  - **Max Observed DiffRatio**: 0.1800 (strictly within configured limits)
 - **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
-  - **Binary Recall**: 0.40 ms (10.8%) | 2 candidates recalled
-  - **Parallel Image I/O**: 2.67 ms (71.2%) | 3 images decoded in thread pool
-  - **DiffMask Verify**: 0.68 ms (18.1%) | 2 pairs verified (441.7 pairs/sec)
-  - **Unattributed Loop Overhead**: 0.57 ms (loop branching, metadata lookups, elimination)
+  - **Binary Recall**: 0.07 ms (2.4%) | 2 candidates recalled
+  - **Parallel Image I/O**: 2.37 ms (82.9%) | 3 images decoded in thread pool
+  - **DiffMask Verify**: 0.42 ms (14.6%) | 2 pairs verified (593.2 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 0.51 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
+
+### Scenario: Adversarial Torture Suite (`mode=confirmed`)
+- **Dataset Scale**: 13 items (3 GT clusters)
+- **Wall-Clock Latency**: **13.97 ms** (service internal: 13.80 ms) | **715.7 Probes/sec** (denominator: end_to_end_ms)
+- **Batches Formed**: 3 (covering 6 skins)
+- **Clustering Quality & Precision**:
+  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, impure batches: 0, wrong peers: 0)
+  - **Target Group Recall**: **100.0%** (3 ground-truth groups)
+  - **Member Coverage**: **100.0%** (fraction of target GT cluster members—including seeds and peers—recovered)
+  - **Max Observed DiffRatio**: 0.0096 (strictly within configured limits)
+- **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:
+  - **Binary Recall**: 0.48 ms (4.2%) | 8 candidates recalled
+  - **Parallel Image I/O**: 8.74 ms (75.4%) | 12 images decoded in thread pool
+  - **DiffMask Verify**: 2.37 ms (20.4%) | 7 pairs verified (501.0 pairs/sec)
+  - **Unattributed Overhead (e2e - stages)**: 2.38 ms (loop branching, metadata lookups, elimination, harness/FFI overhead)
