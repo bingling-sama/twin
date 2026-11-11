@@ -262,6 +262,10 @@ routes.py (HTTP handlers)
   │     ├── embedding.py::compute_text_embedding()
   │     │     └── clip_model.py::encode_text()
   │     └── indexer.py::search()           (faiss.IndexFlatL2 vector search)
+  ├── [Discover] → services/cluster.py::discover_similar_batches()
+  │     ├── indexer.py::search_binary()    (faiss.IndexBinaryFlat SIMD)
+  │     ├── utils/image.py::load_images()  (parallel batch read)
+  │     └── verifiers.py::DiffMaskVerifier (strict pixel difference)
   ├── [Index]   → services/index_service.py::index_single()
   │     ├── indexer.py::get_indexed_filenames()
   │     ├── embedding.py::compute_embedding()
@@ -296,6 +300,7 @@ HTTP Layer     api/routes.py  ──→  Thin REST & SSE endpoints, delegates to
                api/schemas.py ──→  Pydantic v2 validation
                     │
 Orchestration   search.py      ──→  Dual-engine recall (SIMD Hash / ViT Text) + Unified Top-K Verifier
+               cluster.py     ──→  Seedless texture discovery via greedy leader dynamic elimination
                index_service.py ──→  index_single(), async index_batch(), classification & conversion
                sync.py        ──→  startup auto-sync with texture classification & dual-datasource index
                     │
@@ -321,6 +326,7 @@ Domain          clip_model.py  ──→  CLIP singleton, CUDA/MPS/CPU auto-dete
 | **HTTP** | `api/routes.py` | REST & SSE endpoints — thin handlers, 0 business logic. Delegates to `search()`, `search_by_text()`, `index_service`, `indexer`, `get_sync_status()` |
 | HTTP | `api/schemas.py` | Pydantic v2 models: SearchResultItem, SearchResponse, TextSearchResponse, BatchIndexAsyncResponse, HealthResponse, etc. |
 | **Service** | `services/search.py` | Orchestrator: SIMD pHash binary recall (image) / CLIP text recall (text) → Unified Top-K Verifier (DiffMask/SSIM). Returns verified candidates |
+| Service | `services/cluster.py` | Seedless discovery: greedy leader dynamic elimination with DiffMaskVerifier and stages telemetry |
 | Service | `services/classifier.py` | Texture classifier: classifies SkinDouble, SkinSingle, Cape, Elytra, Unknown via UV alpha inspection |
 | Service | `services/converter.py` | UV converter: elevates legacy 64x32 single-layer skins to standard 64x64 double-layer layout |
 | Service | `services/verifiers.py` | Verification strategies: DiffMask (Alpha-masked pixel tolerance) and SSIM verifier |
@@ -376,6 +382,21 @@ POST /api/v1/index/batch (directory)
       │   ├─ compute_dhashes() + compute_phashes() → parallel
       │   └─ indexer.add_items() → batch Faiss insert
       └─ fallback: _index_single_from_disk() on batch failure
+```
+
+### Data Flow (Discover)
+
+```
+GET /api/v1/discover/batches (Seedless discovery)
+  → routes.py: get_discovered_batches()
+  → services/cluster.py: discover_similar_batches()
+      ├─ Step 1: Scan unvisited pool for candidate leader (random/sequential)
+      ├─ Step 2: IndexBinaryFlat SIMD scan for Hamming distance neighbors
+      ├─ Step 3: utils/image.py::load_images() parallel disk batch read
+      ├─ Step 4: Strict DiffMaskVerifier pixel verification (diff_ratio threshold)
+      ├─ Step 5: Form SimilarBatchItem & eliminate all cluster members from unvisited pool
+      └─ Step 6: Collect stage telemetry (recall, io_load, verify)
+  → DiscoverResponse JSON (batches, size, max_diff_ratio, stages)
 ```
 
 ### Computation Layer Internals
@@ -507,6 +528,12 @@ POST /api/v1/index/batch (directory)
 | `TWIN_SYNC_ON_STARTUP` | `false` | Block startup until sync done |
 | `TWIN_INDEX_PATH` | `data` | Index storage dir |
 | `TWIN_IMAGES_DIR` | `data/images` | Source images dir |
+| `TWIN_DISCOVER_CONFIRMED_HAMMING` | `4` | Max pHash Hamming distance for confirmed mode |
+| `TWIN_DISCOVER_CONFIRMED_DIFF_RATIO` | `0.05` | Max DiffMask mismatch ratio for confirmed duplicates |
+| `TWIN_DISCOVER_VARIANTS_HAMMING` | `12` | Max pHash Hamming distance for variants mode |
+| `TWIN_DISCOVER_VARIANTS_DIFF_RATIO` | `0.35` | Max DiffMask mismatch ratio for variant clusters |
+| `TWIN_DISCOVER_RECALL_MULTIPLIER` | `3` | Candidate recall multiplier (`k = batch_size * multiplier`) |
+| `TWIN_DISCOVER_MIN_RECALL_K` | `15` | Minimum binary candidate recall count |
 
 ### Critical Gotcha: OpenMP on macOS & Windows
 

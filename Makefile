@@ -88,6 +88,8 @@ train:
 BENCH_DIR := tests/benchmarks
 BENCH_BASELINE := benchmarks/baseline/baseline.json
 BENCH_JSON := bench_results.json
+BENCH_CLUSTER_BASELINE := benchmarks/baseline/cluster_baseline.json
+BENCH_CLUSTER_JSON := bench_cluster_results.json
 BENCH_FLAGS := --benchmark-only --benchmark-json=$(BENCH_JSON)
 BENCH_QUICK_FLAGS := $(BENCH_FLAGS) --benchmark-min-rounds=5
 
@@ -109,14 +111,43 @@ bench-check:
 		--benchmark-compare=$(BENCH_BASELINE) \
 		--benchmark-compare-fail=mean:10% -v
 
+# Compare cluster discovery benchmarks against cluster_baseline.json (median & p95 <= +10%)
+bench-check-cluster:
+	OMP_NUM_THREADS=1 uv run pytest $(BENCH_DIR)/test_cluster_performance.py --benchmark-only \
+		--benchmark-min-rounds=10 --benchmark-json=$(BENCH_CLUSTER_JSON) -v
+	uv run python benchmarks/bench_report.py $(BENCH_CLUSTER_JSON) \
+		--compare $(BENCH_CLUSTER_BASELINE) --fail-threshold 10
+
+bench-check-cluster-cross-env:
+	OMP_NUM_THREADS=1 uv run pytest $(BENCH_DIR)/test_cluster_performance.py --benchmark-only \
+		--benchmark-min-rounds=10 --benchmark-json=$(BENCH_CLUSTER_JSON) -v
+	uv run python benchmarks/bench_report.py $(BENCH_CLUSTER_JSON) \
+		--compare $(BENCH_CLUSTER_BASELINE) --fail-threshold 10 --allow-cross-env
+
 # Generate human-readable report from JSON
 bench-report:
 	uv run python benchmarks/bench_report.py $(BENCH_JSON)
+
+# Generate and verify cluster discovery markdown report against HEAD
+bench-report-cluster:
+	OMP_NUM_THREADS=1 uv run python benchmarks/cluster_bench.py --rounds 5 \
+		--output benchmarks/cluster_report.md
+	uv run python benchmarks/cluster_bench.py --verify-report benchmarks/cluster_report.md \
+		--expected-rounds 5 --expected-samples 200
+
+bench-verify-cluster-report:
+	uv run python benchmarks/cluster_bench.py --verify-report benchmarks/cluster_report.md
 
 # Save current results as the new baseline
 bench-save-baseline:
 	cp $(BENCH_JSON) $(BENCH_BASELINE)
 	@echo "Baseline saved to $(BENCH_BASELINE)"
+
+# Run & save cluster discovery benchmark baseline (>=10 rounds)
+bench-save-cluster-baseline:
+	OMP_NUM_THREADS=1 uv run pytest $(BENCH_DIR)/test_cluster_performance.py --benchmark-only \
+		--benchmark-min-rounds=10 --benchmark-json=$(BENCH_CLUSTER_BASELINE) -v
+	@echo "Cluster baseline saved to $(BENCH_CLUSTER_BASELINE)"
 
 # Clean build artifacts
 clean:

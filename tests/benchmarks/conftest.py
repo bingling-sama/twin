@@ -523,18 +523,20 @@ def _collect_disk_info() -> dict:
 def pytest_benchmark_update_machine_info(config, machine_info):
     """Augment benchmark machine_info with detailed system data.
 
-    Adds: memory (detailed), gpu, os, packages, disk.
+    Adds: memory (detailed), gpu, os, packages, disk, cluster_metadata.
     Called once per session by pytest-benchmark.
     """
+    from benchmarks.cluster.meta import collect_cluster_metadata
+
     machine_info.setdefault("memory", _collect_memory_info())
     machine_info.setdefault("os", _collect_os_info())
 
     gpu = _collect_gpu_info()
-    if gpu:
-        machine_info.setdefault("gpu", gpu)
+    machine_info.setdefault("gpu", gpu if gpu else {"name": "none"})
 
     machine_info.setdefault("packages", _collect_package_versions())
     machine_info.setdefault("disk", _collect_disk_info())
+    machine_info.setdefault("cluster_metadata", collect_cluster_metadata())
 
 
 @pytest.fixture(scope="session", autouse=True)
