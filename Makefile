@@ -132,7 +132,8 @@ bench-report:
 bench-report-cluster:
 	OMP_NUM_THREADS=1 uv run python benchmarks/cluster_bench.py --rounds 5 \
 		--output benchmarks/cluster_report.md
-	uv run python benchmarks/cluster_bench.py --verify-report benchmarks/cluster_report.md
+	uv run python benchmarks/cluster_bench.py --verify-report benchmarks/cluster_report.md \
+		--expected-rounds 5 --expected-samples 200
 
 bench-verify-cluster-report:
 	uv run python benchmarks/cluster_bench.py --verify-report benchmarks/cluster_report.md

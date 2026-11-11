@@ -14,6 +14,10 @@ from benchmarks.cluster.meta import (
 )
 from benchmarks.cluster_bench import (
     _EXPECTED_SCENARIO_NAMES,
+    _SCENARIO_REPRO_SPECS,
+    _format_runtime_metadata,
+    _format_settings_metadata,
+    _format_zip_fingerprint,
     verify_cluster_report,
 )
 from benchmarks.cluster_bench import main as cluster_bench_main
@@ -203,28 +207,29 @@ def _build_valid_cluster_report(
     commit_line: str,
     source_digest: str | None = None,
     dataset_fp: str | None = None,
+    meta_overrides: dict[str, str] | None = None,
     omit_meta_key: str | None = None,
     omit_scenario: str | None = None,
+    summary_overrides: dict[str, dict[str, str]] | None = None,
+    repro_overrides: dict[str, dict[str, object]] | None = None,
 ) -> str:
     src_dig = compute_cluster_source_digest() if source_digest is None else source_digest
     ds_fp = get_cluster_dataset_fingerprint() if dataset_fp is None else dataset_fp
+    runtime_meta = _format_runtime_metadata()
+    settings_meta = _format_settings_metadata()
     meta = {
         "Generated At": "2026-11-11T19:00:00+08:00",
         "Commit SHA": commit_line,
         "Source Digest (SHA-256)": src_dig,
         "Dataset Fingerprint (SHA-256)": ds_fp,
-        "Python": "3.12.11",
-        "OS Platform": "Windows 11 (AMD64)",
-        "CPU": "AMD64 (16 logical cores)",
-        "GPU": "NVIDIA GeForce RTX 3060 Laptop GPU (6.0 GB)",
-        "Torch / Faiss / Pillow": "2.6.0+cu124 / 1.15.0 / 12.3.0",
+        **runtime_meta,
         "Statistical Rounds": "5",
-        "Haystack Config": "samples=200, use_zip=True",
-        "images.zip Fingerprint": "disabled (--no-zip)",
-        "Confirmed Thresholds": "hamming <= 4, diff_ratio <= 0.05",
-        "Variants Thresholds": "hamming <= 12, diff_ratio <= 0.35",
-        "Recall Window": "min_k=10, multiplier=3",
+        "Haystack Config": "samples=200, use_zip=False",
+        "images.zip Fingerprint": _format_zip_fingerprint(use_zip=False),
+        **settings_meta,
     }
+    if meta_overrides:
+        meta.update(meta_overrides)
     if omit_meta_key:
         meta.pop(omit_meta_key, None)
 
@@ -244,18 +249,52 @@ def _build_valid_cluster_report(
             "",
             "## 🏆 Executive Summary & Strategy Matrix",
             "",
-            "| Scenario | Quality Risk |",
-            "| :--- | :--- |",
+            "| Scenario | Mode | Scale (Items/GT) | Wall Latency Med/P95 [Min-Max] | "
+            "Throughput | Formed Batches | Purity / Impure Rate (Wrong) | Coverage | "
+            "Recall | Quality Risk |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
         ]
     )
     for name in _EXPECTED_SCENARIO_NAMES:
-        if name != omit_scenario:
-            lines.append(f"| **{name}** | `Clean` |")
+        if name == omit_scenario:
+            continue
+        spec = _SCENARIO_REPRO_SPECS[name]
+        ov = (summary_overrides or {}).get(name, {})
+        mode = ov.get("mode", spec["mode"])
+        lat = ov.get("latency", "**10.0ms** (11.0ms) [9.0-11.0]")
+        pur = ov.get("purity", "**100.0%** / 0.0% (0)")
+        cov = ov.get("coverage", "100.0%")
+        rec = ov.get("recall", "**100.0%**")
+        risk = ov.get("risk", "Clean")
+        lines.append(
+            f"| **{name}** | `{mode}` | 100 / 2 | {lat} | 500 prob/s | "
+            f"2 batches (4 skins) | {pur} | {cov} | {rec} | `{risk}` |"
+        )
 
     lines.extend(
         [
             "",
             "## 🔧 Scenario Reproducibility Matrix",
+            "",
+            "| Scenario | Dataset Seed | PRNG Seed | Seed Strategy | "
+            "batch_size | max_batches | max_probes |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+    )
+    for name in _EXPECTED_SCENARIO_NAMES:
+        if name == omit_scenario:
+            continue
+        spec = dict(_SCENARIO_REPRO_SPECS[name])
+        if repro_overrides and name in repro_overrides:
+            spec.update(repro_overrides[name])
+        lines.append(
+            f"| `{name}` | `{spec['dataset_seed']}` | `{spec['random_seed']}` | "
+            f"`{spec['seed_strategy']}` | {spec['batch_size']} | "
+            f"{spec['max_batches']} | {spec['max_probes']} |"
+        )
+
+    lines.extend(
+        [
             "",
             "## 🔬 Telemetry & Fine-Grained Latency Decomposition",
             "",
@@ -269,7 +308,7 @@ def _build_valid_cluster_report(
         if name != omit_scenario:
             lines.extend(
                 [
-                    f"### Scenario: {name} (`mode=confirmed`)",
+                    f"### Scenario: {name} (`mode={_SCENARIO_REPRO_SPECS[name]['mode']}`)",
                     "- **Instrumented Stages Total**: 5.00 ms (instrumented stages: 5.00 ms)",
                     "- **Pairs**: 100.0 pairs/sec, denominator: end_to_end_ms",
                 ]
@@ -290,8 +329,20 @@ def test_verify_cluster_report_passes_clean_head(
         _build_valid_cluster_report(commit_line=f"{fake_head} (clean)"),
         encoding="utf-8",
     )
-    assert verify_cluster_report(report_path) == []
-    assert cluster_bench_main(["--verify-report", str(report_path)]) == 0
+    assert verify_cluster_report(report_path, expected_rounds=5, expected_samples=200) == []
+    assert (
+        cluster_bench_main(
+            [
+                "--verify-report",
+                str(report_path),
+                "--expected-rounds",
+                "5",
+                "--expected-samples",
+                "200",
+            ]
+        )
+        == 0
+    )
 
 
 def test_verify_cluster_report_rejects_stale_dirty_tampered_and_missing(
@@ -362,4 +413,134 @@ def test_verify_cluster_report_rejects_stale_dirty_tampered_and_missing(
     errs = verify_cluster_report(missing_field)
     assert any("Missing required report metadata field: Recall Window" in e for e in errs)
     assert any("Adversarial Torture Suite" in e for e in errs)
+
+
+def test_verify_cluster_report_enforces_settings_runtime_zip_and_repro_matrix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_head = "0123456789abcdef" * 2 + "01234567"
+    monkeypatch.setattr(
+        "benchmarks.cluster_bench._git_head_and_clean",
+        lambda _root=None: (fake_head, True),
+    )
+    fake_zip_fp = {
+        "exists": True,
+        "path": "data/images.zip",
+        "size_bytes": 123456,
+        "png_count": 200,
+        "sha256": "c" * 64,
+    }
+
+    # Exact images.zip SHA-256 parity passes when matching
+    zip_ok = tmp_path / "zip_ok.md"
+    zip_ok.write_text(
+        _build_valid_cluster_report(
+            commit_line=f"{fake_head} (clean)",
+            meta_overrides={
+                "Haystack Config": "samples=200, use_zip=True",
+                "images.zip Fingerprint": _format_zip_fingerprint(use_zip=True, zip_fp=fake_zip_fp),
+            },
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        verify_cluster_report(
+            zip_ok,
+            expected_rounds=5,
+            expected_samples=200,
+            expected_use_zip=True,
+            zip_fp_override=fake_zip_fp,
+        )
+        == []
+    )
+
+    # Tampered thresholds, runtime, rounds/samples, zip SHA-256, repro seeds/budgets, and risk badge
+    tampered = tmp_path / "tampered.md"
+    tampered.write_text(
+        _build_valid_cluster_report(
+            commit_line=f"{fake_head} (clean)",
+            meta_overrides={
+                "Generated At": "not-an-iso-timestamp",
+                "Python": "3.9.0",
+                "Torch / Faiss / Pillow": "1.0.0 / 1.0.0 / 9.0.0",
+                "Confirmed Thresholds": "hamming <= 99, diff_ratio <= 0.99",
+                "Recall Window": "min_k=10, multiplier=3",
+                "Statistical Rounds": "3",
+                "Haystack Config": "samples=100, use_zip=True",
+                "images.zip Fingerprint": _format_zip_fingerprint(
+                    use_zip=True,
+                    zip_fp={**fake_zip_fp, "sha256": "d" * 64},
+                ),
+            },
+            summary_overrides={
+                "Exact Duplicate Swarms": {
+                    "mode": "variants",
+                    "latency": "10.0ms",
+                    "purity": "**80.0%** / 10.0% (2)",
+                    "risk": "Clean",
+                },
+                "Massive 50-Skin Duplicate Swarm": {
+                    "risk": "RISK: fake_warning",
+                },
+            },
+            repro_overrides={
+                "Derivative Variant Clusters": {
+                    "dataset_seed": 999,
+                    "max_probes": 10,
+                }
+            },
+        ),
+        encoding="utf-8",
+    )
+    errs = verify_cluster_report(
+        tampered,
+        expected_rounds=5,
+        expected_samples=200,
+        expected_use_zip=False,
+        zip_fp_override=fake_zip_fp,
+        verify_runtime=True,
+    )
+    assert any("Invalid ISO-8601" in e for e in errs)
+    assert any("Report runtime Python mismatch" in e for e in errs)
+    assert any("Report runtime Torch / Faiss / Pillow mismatch" in e for e in errs)
+    assert any("Report Confirmed Thresholds mismatch" in e for e in errs)
+    assert any("Report Recall Window mismatch" in e for e in errs)
+    assert any("Statistical Rounds mismatch" in e for e in errs)
+    assert any("Haystack samples mismatch" in e for e in errs)
+    assert any("Haystack use_zip mismatch" in e for e in errs)
+    assert any("images.zip Fingerprint mismatch" in e for e in errs)
+    assert any("Exact Duplicate Swarms mode mismatch" in e for e in errs)
+    assert any("Exact Duplicate Swarms missing Med/P95" in e for e in errs)
+    assert any("Exact Duplicate Swarms has degraded metrics" in e for e in errs)
+    assert any("Massive 50-Skin Duplicate Swarm is fully clean" in e for e in errs)
+    assert any("Derivative Variant Clusters reproducibility params mismatch" in e for e in errs)
+
+    # verify_runtime=False waives OS/Python/package checks but keeps provenance & budgets
+    cross_errs = verify_cluster_report(
+        tampered,
+        expected_rounds=5,
+        expected_samples=200,
+        zip_fp_override=fake_zip_fp,
+        verify_runtime=False,
+    )
+    assert not any("Report runtime" in e for e in cross_errs)
+    assert any("Statistical Rounds mismatch" in e for e in cross_errs)
+    assert any(
+        "Derivative Variant Clusters reproducibility params mismatch" in e for e in cross_errs
+    )
+
+    # CLI flags reject mismatched rounds/samples
+    assert (
+        cluster_bench_main(
+            [
+                "--verify-report",
+                str(tampered),
+                "--expected-rounds",
+                "5",
+                "--expected-samples",
+                "200",
+            ]
+        )
+        == 1
+    )
 

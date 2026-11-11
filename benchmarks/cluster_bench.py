@@ -62,18 +62,103 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("cluster_bench")
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_EXPECTED_SCENARIO_NAMES: tuple[str, ...] = (
-    "Exact Duplicate Swarms",
-    "Massive 50-Skin Duplicate Swarm",
-    "Derivative Variant Clusters",
-    "Sparse Real Haystack (Confirmed)",
-    "Sparse Real Haystack (Variants)",
-    "Sequential Seed Strategy",
-    "Threshold Boundary Gating (Confirmed)",
-    "Threshold Boundary Gating (Variants)",
-    "Anti-Transitivity Elimination",
-    "Adversarial Torture Suite",
-)
+_HAYSTACK_CONFIG_RE = re.compile(r"^samples=(\d+),\s*use_zip=(True|False)$")
+_LATENCY_CELL_RE = re.compile(r"\*\*([0-9.]+)ms\*\*\s*\(([0-9.]+)ms\)\s*\[([0-9.]+)-([0-9.]+)\]")
+_PURITY_CELL_RE = re.compile(r"\*\*([0-9.]+)%\*\*\s*/\s*([0-9.]+)%\s*\((\d+)\)")
+
+_SCENARIO_REPRO_SPECS: dict[str, dict[str, Any]] = {
+    "Exact Duplicate Swarms": {
+        "dataset_seed": 101,
+        "random_seed": 42,
+        "seed_strategy": "random",
+        "mode": "confirmed",
+        "batch_size": 5,
+        "max_batches": 50,
+        "max_probes": 200,
+    },
+    "Massive 50-Skin Duplicate Swarm": {
+        "dataset_seed": 102,
+        "random_seed": 42,
+        "seed_strategy": "sequential",
+        "mode": "confirmed",
+        "batch_size": 5,
+        "max_batches": 50,
+        "max_probes": 200,
+    },
+    "Derivative Variant Clusters": {
+        "dataset_seed": 201,
+        "random_seed": 42,
+        "seed_strategy": "random",
+        "mode": "variants",
+        "batch_size": 5,
+        "max_batches": 30,
+        "max_probes": 200,
+    },
+    "Sparse Real Haystack (Confirmed)": {
+        "dataset_seed": 301,
+        "random_seed": 42,
+        "seed_strategy": "random",
+        "mode": "confirmed",
+        "batch_size": 5,
+        "max_batches": 30,
+        "max_probes": 200,
+    },
+    "Sparse Real Haystack (Variants)": {
+        "dataset_seed": 301,
+        "random_seed": 42,
+        "seed_strategy": "random",
+        "mode": "variants",
+        "batch_size": 5,
+        "max_batches": 30,
+        "max_probes": 200,
+    },
+    "Sequential Seed Strategy": {
+        "dataset_seed": 301,
+        "random_seed": 42,
+        "seed_strategy": "sequential",
+        "mode": "confirmed",
+        "batch_size": 5,
+        "max_batches": 30,
+        "max_probes": 200,
+    },
+    "Threshold Boundary Gating (Confirmed)": {
+        "dataset_seed": 401,
+        "random_seed": 42,
+        "seed_strategy": "sequential",
+        "mode": "confirmed",
+        "batch_size": 5,
+        "max_batches": 5,
+        "max_probes": 200,
+    },
+    "Threshold Boundary Gating (Variants)": {
+        "dataset_seed": 401,
+        "random_seed": 42,
+        "seed_strategy": "sequential",
+        "mode": "variants",
+        "batch_size": 5,
+        "max_batches": 5,
+        "max_probes": 200,
+    },
+    "Anti-Transitivity Elimination": {
+        "dataset_seed": 501,
+        "random_seed": 42,
+        "seed_strategy": "sequential",
+        "mode": "variants",
+        "batch_size": 5,
+        "max_batches": 5,
+        "max_probes": 200,
+    },
+    "Adversarial Torture Suite": {
+        "dataset_seed": 600,
+        "random_seed": 42,
+        "seed_strategy": "random",
+        "mode": "confirmed",
+        "batch_size": 5,
+        "max_batches": 10,
+        "max_probes": 200,
+    },
+}
+_EXPECTED_SCENARIO_NAMES: tuple[str, ...] = tuple(_SCENARIO_REPRO_SPECS.keys())
 
 
 def _git_head_and_clean(repo_root: Path = _ROOT) -> tuple[str, bool]:
@@ -91,6 +176,58 @@ def _git_head_and_clean(repo_root: Path = _ROOT) -> tuple[str, bool]:
     return commit, not bool(dirty_out.strip())
 
 
+def _format_zip_fingerprint(use_zip: bool, zip_fp: dict[str, Any] | None = None) -> str:
+    """Format canonical images.zip fingerprint string for report generation & verification."""
+    if not use_zip:
+        return "disabled (--no-zip)"
+    fp = get_zip_fingerprint() if zip_fp is None else zip_fp
+    if fp.get("exists"):
+        return (
+            f"{fp['size_bytes']:,} bytes | "
+            f"{fp['png_count']:,} PNGs | sha256={fp['sha256']}"
+        )
+    return f"missing ({fp['path']}, synthetic fallback used)"
+
+
+def _format_settings_metadata() -> dict[str, str]:
+    """Return canonical discovery threshold and recall-window strings from live settings."""
+    return {
+        "Confirmed Thresholds": (
+            f"hamming <= {settings.discover_confirmed_hamming}, "
+            f"diff_ratio <= {settings.discover_confirmed_diff_ratio}"
+        ),
+        "Variants Thresholds": (
+            f"hamming <= {settings.discover_variants_hamming}, "
+            f"diff_ratio <= {settings.discover_variants_diff_ratio}"
+        ),
+        "Recall Window": (
+            f"min_k={settings.discover_min_recall_k}, "
+            f"multiplier={settings.discover_recall_multiplier}"
+        ),
+    }
+
+
+def _format_runtime_metadata() -> dict[str, str]:
+    """Return live Python/OS/CPU/GPU/package strings for report generation & verification."""
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        gpu_info = f"{gpu_name} ({gpu_mem_gb:.1f} GB)"
+    else:
+        gpu_info = "CPU only (CUDA unavailable)"
+    cpu_info = platform.processor() or platform.machine()
+    cpu_cores = os.cpu_count() or 1
+    return {
+        "Python": platform.python_version(),
+        "OS Platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
+        "CPU": f"{cpu_info} ({cpu_cores} logical cores)",
+        "GPU": gpu_info,
+        "Torch / Faiss / Pillow": (
+            f"{torch.__version__} / {getattr(faiss, '__version__', 'unknown')} / {PIL.__version__}"
+        ),
+    }
+
+
 def get_environment_metadata(
     rounds: int = 3,
     samples: int = 200,
@@ -106,58 +243,20 @@ def get_environment_metadata(
 
     source_digest = compute_cluster_source_digest()
     dataset_fingerprint = get_cluster_dataset_fingerprint()
-
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        gpu_info = f"{gpu_name} ({gpu_mem_gb:.1f} GB)"
-    else:
-        gpu_info = "CPU only (CUDA unavailable)"
-
-    if use_zip:
-        zip_fp = get_zip_fingerprint()
-        if zip_fp.get("exists"):
-            zip_str = (
-                f"{zip_fp['size_bytes']:,} bytes | "
-                f"{zip_fp['png_count']:,} PNGs | sha256={zip_fp['sha256']}"
-            )
-        else:
-            zip_str = f"missing ({zip_fp['path']}, synthetic fallback used)"
-    else:
-        zip_str = "disabled (--no-zip)"
-
-    cpu_info = platform.processor() or platform.machine()
-    cpu_cores = os.cpu_count() or 1
     now_iso = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
-    return {
+    meta: dict[str, str] = {
         "Generated At": now_iso,
         "Commit SHA": f"{commit}{dirty_tag}",
         "Source Digest (SHA-256)": source_digest,
         "Dataset Fingerprint (SHA-256)": dataset_fingerprint,
-        "Python": platform.python_version(),
-        "OS Platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
-        "CPU": f"{cpu_info} ({cpu_cores} logical cores)",
-        "GPU": gpu_info,
-        "Torch / Faiss / Pillow": (
-            f"{torch.__version__} / {getattr(faiss, '__version__', 'unknown')} / {PIL.__version__}"
-        ),
+        **_format_runtime_metadata(),
         "Statistical Rounds": str(rounds),
         "Haystack Config": f"samples={samples}, use_zip={use_zip}",
-        "images.zip Fingerprint": zip_str,
-        "Confirmed Thresholds": (
-            f"hamming <= {settings.discover_confirmed_hamming}, "
-            f"diff_ratio <= {settings.discover_confirmed_diff_ratio}"
-        ),
-        "Variants Thresholds": (
-            f"hamming <= {settings.discover_variants_hamming}, "
-            f"diff_ratio <= {settings.discover_variants_diff_ratio}"
-        ),
-        "Recall Window": (
-            f"min_k={settings.discover_min_recall_k}, "
-            f"multiplier={settings.discover_recall_multiplier}"
-        ),
+        "images.zip Fingerprint": _format_zip_fingerprint(use_zip=use_zip),
+        **_format_settings_metadata(),
     }
+    return meta
 
 
 def format_markdown_report(
@@ -332,16 +431,27 @@ def _run_and_record(
     results_with_stats: list[tuple[ScenarioResult, dict[str, Any]]],
     step_label: str,
     rounds: int,
-    dataset_seed: int | str,
-    **kwargs: Any,
+    scenario_name: str,
+    *,
+    items: list[Any],
+    ground_truth_counts: dict[str, int],
 ) -> None:
-    """Execute one benchmark scenario, append stats, and log standardized summary."""
+    """Execute one benchmark scenario from canonical spec, append stats, and log summary."""
+    spec = _SCENARIO_REPRO_SPECS[scenario_name]
     logger.info("--> Running %s", step_label)
     res, stats = run_scenario_with_stats(
         evaluate_cluster_scenario,
         rounds=rounds,
-        dataset_seed=dataset_seed,
-        **kwargs,
+        dataset_seed=spec["dataset_seed"],
+        scenario_name=scenario_name,
+        items=items,
+        ground_truth_counts=ground_truth_counts,
+        mode=spec["mode"],
+        batch_size=spec["batch_size"],
+        max_batches=spec["max_batches"],
+        max_probes=spec["max_probes"],
+        seed_strategy=spec["seed_strategy"],
+        random_seed=spec["random_seed"],
     )
     results_with_stats.append((res, stats))
     logger.info(
@@ -368,12 +478,40 @@ def _parse_metadata_table(report_text: str) -> dict[str, str]:
     return meta
 
 
+def _parse_markdown_section_rows(report_text: str, heading: str) -> list[list[str]]:
+    """Extract markdown table data cells below heading until the next heading."""
+    lines = report_text.splitlines()
+    in_section = False
+    rows: list[list[str]] = []
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("## "):
+            if in_section:
+                break
+            in_section = line == heading
+            continue
+        if not in_section or not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cells or all(set(c) <= {":", "-", " "} for c in cells):
+            continue
+        if cells[0] == "Scenario":
+            continue
+        rows.append(cells)
+    return rows
+
+
 def verify_cluster_report(
     report_path: Path | str,
     *,
     repo_root: Path = _ROOT,
+    expected_rounds: int | None = None,
+    expected_samples: int | None = None,
+    expected_use_zip: bool | None = None,
+    zip_fp_override: dict[str, Any] | None = None,
+    verify_runtime: bool = True,
 ) -> list[str]:
-    """Verify report completeness, clean Commit SHA == HEAD, and full SHA-256 digests."""
+    """Verify report freshness, SHA-256 digests, live settings, and scenario parameters."""
     path = Path(report_path)
     if not path.is_file():
         return [f"Report file not found: {path}"]
@@ -404,6 +542,13 @@ def verify_cluster_report(
     for key in required_meta_keys:
         if not meta.get(key):
             errors.append(f"Missing required report metadata field: {key}")
+
+    generated_at = meta.get("Generated At", "")
+    if generated_at:
+        try:
+            datetime.fromisoformat(generated_at)
+        except ValueError:
+            errors.append(f"Invalid ISO-8601 Generated At timestamp: {generated_at!r}")
 
     try:
         head_sha, repo_clean = _git_head_and_clean(repo_root)
@@ -446,6 +591,56 @@ def verify_cluster_report(
             f"Report Dataset Fingerprint mismatch: expected {expected_ds}, got {recorded_ds}"
         )
 
+    for key, expected_val in _format_settings_metadata().items():
+        actual_val = meta.get(key, "")
+        if actual_val and actual_val != expected_val:
+            errors.append(f"Report {key} mismatch: expected {expected_val!r}, got {actual_val!r}")
+
+    if verify_runtime:
+        for key, expected_val in _format_runtime_metadata().items():
+            actual_val = meta.get(key, "")
+            if actual_val and actual_val != expected_val:
+                errors.append(
+                    f"Report runtime {key} mismatch: expected {expected_val!r}, got {actual_val!r}"
+                )
+
+    rounds_raw = meta.get("Statistical Rounds", "")
+    if rounds_raw:
+        if not rounds_raw.isdigit() or int(rounds_raw) < 1:
+            errors.append(f"Invalid Statistical Rounds value: {rounds_raw!r}")
+        elif expected_rounds is not None and int(rounds_raw) != expected_rounds:
+            errors.append(
+                f"Statistical Rounds mismatch: expected {expected_rounds}, got {rounds_raw}"
+            )
+
+    haystack_raw = meta.get("Haystack Config", "")
+    if haystack_raw:
+        hs_match = _HAYSTACK_CONFIG_RE.match(haystack_raw)
+        if not hs_match:
+            errors.append(f"Invalid Haystack Config format: {haystack_raw!r}")
+        else:
+            recorded_samples = int(hs_match.group(1))
+            recorded_use_zip = hs_match.group(2) == "True"
+            if expected_samples is not None and recorded_samples != expected_samples:
+                errors.append(
+                    f"Haystack samples mismatch: expected {expected_samples}, "
+                    f"got {recorded_samples}"
+                )
+            if expected_use_zip is not None and recorded_use_zip != expected_use_zip:
+                errors.append(
+                    f"Haystack use_zip mismatch: expected {expected_use_zip}, "
+                    f"got {recorded_use_zip}"
+                )
+            actual_zip_fp = meta.get("images.zip Fingerprint", "")
+            expected_zip_fp = _format_zip_fingerprint(
+                use_zip=recorded_use_zip, zip_fp=zip_fp_override
+            )
+            if actual_zip_fp and actual_zip_fp != expected_zip_fp:
+                errors.append(
+                    f"images.zip Fingerprint mismatch: expected {expected_zip_fp!r}, "
+                    f"got {actual_zip_fp!r}"
+                )
+
     required_sections = (
         "## 🖥️ Execution Environment Metadata",
         "## 🏆 Executive Summary & Strategy Matrix",
@@ -457,9 +652,90 @@ def verify_cluster_report(
         if section not in text:
             errors.append(f"Missing required report section: {section}")
 
-    for scenario_name in _EXPECTED_SCENARIO_NAMES:
-        if f"| **{scenario_name}** |" not in text:
+    summary_rows: dict[str, list[str]] = {}
+    for cells in _parse_markdown_section_rows(text, "## 🏆 Executive Summary & Strategy Matrix"):
+        if len(cells) != 10:
+            errors.append(f"Executive Summary row must have 10 columns, got {len(cells)}: {cells}")
+            continue
+        scen = cells[0].strip("* ")
+        summary_rows[scen] = cells
+
+    repro_rows: dict[str, list[str]] = {}
+    for cells in _parse_markdown_section_rows(text, "## 🔧 Scenario Reproducibility Matrix"):
+        if len(cells) != 7:
+            errors.append(
+                f"Reproducibility Matrix row must have 7 columns, got {len(cells)}: {cells}"
+            )
+            continue
+        scen = cells[0].strip("` ")
+        repro_rows[scen] = cells
+
+    for scenario_name, spec in _SCENARIO_REPRO_SPECS.items():
+        if scenario_name not in summary_rows:
             errors.append(f"Missing Executive Summary row for scenario: {scenario_name}")
+        else:
+            cells = summary_rows[scenario_name]
+            rec_mode = cells[1].strip("` ")
+            if rec_mode != spec["mode"]:
+                errors.append(
+                    f"Scenario {scenario_name} mode mismatch: expected {spec['mode']!r}, "
+                    f"got {rec_mode!r}"
+                )
+            if not _LATENCY_CELL_RE.search(cells[3]):
+                errors.append(
+                    f"Scenario {scenario_name} missing Med/P95 [Min-Max] latency format: "
+                    f"{cells[3]!r}"
+                )
+            pur_match = _PURITY_CELL_RE.search(cells[6])
+            cov_match = re.search(r"([0-9.]+)%", cells[7])
+            rec_match = re.search(r"\*\*([0-9.]+)%\*\*", cells[8])
+            if not (pur_match and cov_match and rec_match):
+                errors.append(
+                    f"Scenario {scenario_name} missing purity/impure/coverage/recall metrics."
+                )
+            else:
+                purity_val = float(pur_match.group(1))
+                impure_val = float(pur_match.group(2))
+                wrong_val = int(pur_match.group(3))
+                cov_val = float(cov_match.group(1))
+                recall_val = float(rec_match.group(1))
+                badge = cells[9].strip("` ")
+                needs_risk = (
+                    purity_val < 100.0
+                    or impure_val > 0.0
+                    or wrong_val > 0
+                    or cov_val < 100.0
+                    or recall_val < 100.0
+                )
+                if needs_risk and not badge.startswith("RISK:"):
+                    errors.append(
+                        f"Scenario {scenario_name} has degraded metrics "
+                        f"but Quality Risk is {badge!r}"
+                    )
+                if not needs_risk and badge != "Clean":
+                    errors.append(
+                        f"Scenario {scenario_name} is fully clean but Quality Risk is {badge!r}"
+                    )
+
+        if scenario_name not in repro_rows:
+            errors.append(f"Missing Reproducibility Matrix row for scenario: {scenario_name}")
+        else:
+            rcells = repro_rows[scenario_name]
+            expected_repro = (
+                str(spec["dataset_seed"]),
+                str(spec["random_seed"]),
+                str(spec["seed_strategy"]),
+                str(spec["batch_size"]),
+                str(spec["max_batches"]),
+                str(spec["max_probes"]),
+            )
+            actual_repro = tuple(c.strip("` ") for c in rcells[1:])
+            if actual_repro != expected_repro:
+                errors.append(
+                    f"Scenario {scenario_name} reproducibility params mismatch: "
+                    f"expected {expected_repro}, got {actual_repro}"
+                )
+
         if f"### Scenario: {scenario_name} " not in text:
             errors.append(f"Missing Detailed Scenario section for: {scenario_name}")
 
@@ -485,10 +761,26 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Verify an existing cluster_report.md against HEAD, clean status, and SHA-256 digests",
     )
+    parser.add_argument(
+        "--expected-rounds",
+        type=int,
+        default=None,
+        help="Require Statistical Rounds in --verify-report to match this value",
+    )
+    parser.add_argument(
+        "--expected-samples",
+        type=int,
+        default=None,
+        help="Require Haystack samples in --verify-report to match this value",
+    )
     args = parser.parse_args(argv)
 
     if args.verify_report:
-        errors = verify_cluster_report(args.verify_report)
+        errors = verify_cluster_report(
+            args.verify_report,
+            expected_rounds=args.expected_rounds,
+            expected_samples=args.expected_samples,
+        )
         if errors:
             print("CLUSTER REPORT VERIFICATION FAILED:", file=sys.stderr)
             for err in errors:
@@ -504,62 +796,48 @@ def main(argv: list[str] | None = None) -> int:
 
     # 1. Duplicate Swarms (Exact & Near-Lossless Duplicates)
     dup_items, dup_counts = build_duplicate_swarms_dataset(
-        swarm_sizes=[30, 20, 15], distractor_count=40, seed=101
+        swarm_sizes=[30, 20, 15],
+        distractor_count=40,
+        seed=_SCENARIO_REPRO_SPECS["Exact Duplicate Swarms"]["dataset_seed"],
     )
     _run_and_record(
         results_with_stats,
         "Scenario 1: Exact Duplicate Swarms (Top-K Starvation Stress)",
         rounds=args.rounds,
-        dataset_seed=101,
         scenario_name="Exact Duplicate Swarms",
         items=dup_items,
         ground_truth_counts=dup_counts,
-        mode="confirmed",
-        batch_size=5,
-        max_batches=50,
-        max_probes=200,
-        seed_strategy="random",
-        random_seed=42,
     )
 
     # 2. Large Scale Duplicate Penetration (50 identical skins)
     large_items, large_counts = build_duplicate_swarms_dataset(
-        swarm_sizes=[50], distractor_count=20, seed=102
+        swarm_sizes=[50],
+        distractor_count=20,
+        seed=_SCENARIO_REPRO_SPECS["Massive 50-Skin Duplicate Swarm"]["dataset_seed"],
     )
     _run_and_record(
         results_with_stats,
         "Scenario 2: Massive 50-Skin Duplicate Swarm",
         rounds=args.rounds,
-        dataset_seed=102,
         scenario_name="Massive 50-Skin Duplicate Swarm",
         items=large_items,
         ground_truth_counts=large_counts,
-        mode="confirmed",
-        batch_size=5,
-        max_batches=50,
-        max_probes=200,
-        seed_strategy="sequential",
-        random_seed=42,
     )
 
     # 3. Multi-Cluster Derivative Variants (Recolors & Edits)
     var_items, var_counts = build_variant_clusters_dataset(
-        num_clusters=5, items_per_cluster=6, distractor_count=40, seed=201
+        num_clusters=5,
+        items_per_cluster=6,
+        distractor_count=40,
+        seed=_SCENARIO_REPRO_SPECS["Derivative Variant Clusters"]["dataset_seed"],
     )
     _run_and_record(
         results_with_stats,
         "Scenario 3: Derivative Variant Clusters (Recolors / Edits)",
         rounds=args.rounds,
-        dataset_seed=201,
         scenario_name="Derivative Variant Clusters",
         items=var_items,
         ground_truth_counts=var_counts,
-        mode="variants",
-        batch_size=5,
-        max_batches=30,
-        max_probes=200,
-        seed_strategy="random",
-        random_seed=42,
     )
 
     # 4. Sparse Real-World Haystack (Confirmed & Variants & Sequential)
@@ -568,23 +846,16 @@ def main(argv: list[str] | None = None) -> int:
         num_duplicate_pairs=10,
         num_variant_clusters=5,
         use_zip=use_zip,
-        seed=301,
+        seed=_SCENARIO_REPRO_SPECS["Sparse Real Haystack (Confirmed)"]["dataset_seed"],
     )
     dup_gt_counts = {k: v for k, v in real_counts.items() if "dup" in k}
     _run_and_record(
         results_with_stats,
         "Scenario 4: Sparse Real Haystack (Confirmed Duplicates)",
         rounds=args.rounds,
-        dataset_seed=301,
         scenario_name="Sparse Real Haystack (Confirmed)",
         items=real_items,
         ground_truth_counts=dup_gt_counts,
-        mode="confirmed",
-        batch_size=5,
-        max_batches=30,
-        max_probes=200,
-        seed_strategy="random",
-        random_seed=42,
     )
 
     var_gt_counts = {k: v for k, v in real_counts.items() if "var" in k}
@@ -592,103 +863,71 @@ def main(argv: list[str] | None = None) -> int:
         results_with_stats,
         "Scenario 5: Sparse Real Haystack (Variants Exploration)",
         rounds=args.rounds,
-        dataset_seed=301,
         scenario_name="Sparse Real Haystack (Variants)",
         items=real_items,
         ground_truth_counts=var_gt_counts,
-        mode="variants",
-        batch_size=5,
-        max_batches=30,
-        max_probes=200,
-        seed_strategy="random",
-        random_seed=42,
     )
 
     _run_and_record(
         results_with_stats,
         "Scenario 6: Seed Strategy Comparison (Sequential on Haystack)",
         rounds=args.rounds,
-        dataset_seed=301,
         scenario_name="Sequential Seed Strategy",
         items=real_items,
         ground_truth_counts=dup_gt_counts,
-        mode="confirmed",
-        batch_size=5,
-        max_batches=30,
-        max_probes=200,
-        seed_strategy="sequential",
-        random_seed=42,
     )
 
     # 7 & 8. Threshold Boundary Verification (Confirmed & Variants)
-    bc_items, bc_counts = build_boundary_dataset(seed=401, mode="confirmed")
+    bc_items, bc_counts = build_boundary_dataset(
+        seed=_SCENARIO_REPRO_SPECS["Threshold Boundary Gating (Confirmed)"]["dataset_seed"],
+        mode="confirmed",
+    )
     _run_and_record(
         results_with_stats,
         "Scenario 7: Threshold Boundary Gating (Confirmed)",
         rounds=args.rounds,
-        dataset_seed=401,
         scenario_name="Threshold Boundary Gating (Confirmed)",
         items=bc_items,
         ground_truth_counts=bc_counts,
-        mode="confirmed",
-        batch_size=5,
-        max_batches=5,
-        max_probes=200,
-        seed_strategy="sequential",
-        random_seed=42,
     )
 
-    bv_items, bv_counts = build_boundary_dataset(seed=401, mode="variants")
+    bv_items, bv_counts = build_boundary_dataset(
+        seed=_SCENARIO_REPRO_SPECS["Threshold Boundary Gating (Variants)"]["dataset_seed"],
+        mode="variants",
+    )
     _run_and_record(
         results_with_stats,
         "Scenario 8: Threshold Boundary Gating (Variants)",
         rounds=args.rounds,
-        dataset_seed=401,
         scenario_name="Threshold Boundary Gating (Variants)",
         items=bv_items,
         ground_truth_counts=bv_counts,
-        mode="variants",
-        batch_size=5,
-        max_batches=5,
-        max_probes=200,
-        seed_strategy="sequential",
-        random_seed=42,
     )
 
     # 9. Transitivity Chain Elimination
-    t_items, t_counts = build_transitivity_chain_dataset(seed=501)
+    t_items, t_counts = build_transitivity_chain_dataset(
+        seed=_SCENARIO_REPRO_SPECS["Anti-Transitivity Elimination"]["dataset_seed"]
+    )
     _run_and_record(
         results_with_stats,
         "Scenario 9: Anti-Transitivity Elimination",
         rounds=args.rounds,
-        dataset_seed=501,
         scenario_name="Anti-Transitivity Elimination",
         items=t_items,
         ground_truth_counts=t_counts,
-        mode="variants",
-        batch_size=5,
-        max_batches=5,
-        max_probes=200,
-        seed_strategy="sequential",
-        random_seed=42,
     )
 
     # 10. Adversarial Torture Suite
-    adv_items, adv_counts = build_adversarial_dataset(seed=600)
+    adv_items, adv_counts = build_adversarial_dataset(
+        seed=_SCENARIO_REPRO_SPECS["Adversarial Torture Suite"]["dataset_seed"]
+    )
     _run_and_record(
         results_with_stats,
         "Scenario 10: Adversarial Torture Suite (Confirmed)",
         rounds=args.rounds,
-        dataset_seed=600,
         scenario_name="Adversarial Torture Suite",
         items=adv_items,
         ground_truth_counts=adv_counts,
-        mode="confirmed",
-        batch_size=5,
-        max_batches=10,
-        max_probes=200,
-        seed_strategy="random",
-        random_seed=42,
     )
 
     # Generate and save report
