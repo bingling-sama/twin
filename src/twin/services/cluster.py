@@ -24,20 +24,18 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from PIL import Image
 
-from twin.api.schemas import DiscoveryMode
 from twin.core.config import settings
+from twin.core.types import DatasourceType, DiscoveryMode, SeedStrategy
 from twin.services.hasher import hamming_distance
 from twin.services.indexer import Indexer, indexer
 from twin.services.verifiers import DiffMaskVerifier
 from twin.utils.image import load_images
 
 logger = logging.getLogger(__name__)
-
-SeedStrategy = Literal["random", "sequential"]
 
 
 def _build_discover_response(
@@ -61,7 +59,7 @@ def _build_discover_response(
 
 
 def discover_similar_batches(
-    datasource: str = "skin",
+    datasource: DatasourceType = "skin",
     max_batches: int = 5,
     batch_size: int = 5,
     mode: DiscoveryMode = "confirmed",
@@ -86,6 +84,10 @@ def discover_similar_batches(
         Dictionary containing discovered batches, count, probes, performance metrics,
         and stage-level telemetry.
     """
+    if datasource not in ("skin", "cape"):
+        raise ValueError(
+            f"Unsupported datasource: '{datasource}'. Must be 'skin' or 'cape'."
+        )
     if mode not in ("confirmed", "variants"):
         raise ValueError(
             f"Unsupported discovery mode: '{mode}'. Must be 'confirmed' or 'variants'."
@@ -94,6 +96,12 @@ def discover_similar_batches(
         raise ValueError(
             f"Unsupported seed strategy: '{seed_strategy}'. Must be 'random' or 'sequential'."
         )
+    if batch_size < 2:
+        raise ValueError(f"batch_size must be >= 2, got {batch_size}.")
+    if max_batches < 1:
+        raise ValueError(f"max_batches must be >= 1, got {max_batches}.")
+    if max_probes < 1:
+        raise ValueError(f"max_probes must be >= 1, got {max_probes}.")
 
     t0 = time.perf_counter()
     active_indexer = indexer_instance if indexer_instance is not None else indexer
@@ -175,22 +183,24 @@ def discover_similar_batches(
             unvisited.discard(seed_idx)
             continue
 
-        # Adaptive recall expansion: expand k until enough unvisited candidates are found
-        # or the search distance exceeds max_hamming / reaches total_items (P1 bugfix)
+        # Adaptive recall + verification loop: expand k until verified matches fill batch,
+        # or all items are searched, or monotonic Hamming distance exceeds max_hamming.
         curr_k = min(
             total_items,
             max(batch_size * settings.discover_recall_multiplier, settings.discover_min_recall_k),
         )
-        candidate_ids: list[int] = []
-        candidate_dists: dict[int, int] = {}
+        seed_path = seed_meta.get("path", "")
+        evaluated_cands: set[int] = set()
+        matching_members: list[dict[str, Any]] = []
+        seed_img_missing = False
 
         while True:
             t_rec_0 = time.perf_counter()
             dists, ids = active_indexer.search_binary(seed_phash, k=curr_k, datasource=datasource)
             t_recall_total += time.perf_counter() - t_rec_0
 
-            candidate_ids.clear()
-            candidate_dists.clear()
+            new_candidate_ids: list[int] = []
+            candidate_dists: dict[int, int] = {}
             max_recalled_dist = 0
 
             for d, idx in zip(dists, ids):
@@ -198,110 +208,112 @@ def discover_similar_batches(
                     continue
                 d_val = int(d)
                 max_recalled_dist = max(max_recalled_dist, d_val)
-                if idx == seed_idx or idx not in unvisited:
+                if idx == seed_idx or idx not in unvisited or idx in evaluated_cands:
                     continue
                 if d_val <= max_hamming:
-                    candidate_ids.append(idx)
+                    new_candidate_ids.append(idx)
                     candidate_dists[idx] = d_val
 
-            # Stop expansion if we have sufficient candidates, or searched all items,
-            # or the monotonic Hamming distance strictly exceeds threshold.
+            total_candidates_recalled += len(new_candidate_ids)
+
+            if new_candidate_ids:
+                cand_metas: dict[int, dict] = {}
+                paths_to_load: list[str] = []
+
+                if seed_path and seed_path not in img_cache and Path(seed_path).exists():
+                    paths_to_load.append(seed_path)
+
+                for cand_idx in new_candidate_ids:
+                    c_meta = active_indexer.get_metadata(cand_idx, datasource=datasource)
+                    if c_meta:
+                        cand_metas[cand_idx] = c_meta
+                        c_path = c_meta.get("path", "")
+                        if c_path and c_path not in img_cache and Path(c_path).exists():
+                            paths_to_load.append(c_path)
+
+                if paths_to_load:
+                    paths_to_load = list(dict.fromkeys(paths_to_load))
+                    t_io_0 = time.perf_counter()
+                    loaded_imgs, ok_paths, _ = load_images(paths_to_load)
+                    for p, img in zip(ok_paths, loaded_imgs):
+                        img_cache[p] = img
+                    total_images_loaded += len(ok_paths)
+                    t_io_total += time.perf_counter() - t_io_0
+
+                seed_img = img_cache.get(seed_path)
+                if seed_img is None:
+                    logger.warning(
+                        "Seed texture %s (%s) not found on disk, skipping probe",
+                        seed_idx,
+                        seed_path,
+                    )
+                    seed_img_missing = True
+                    break
+
+                for cand_idx in new_candidate_ids:
+                    evaluated_cands.add(cand_idx)
+                    cand_meta = cand_metas.get(cand_idx)
+                    if not cand_meta:
+                        continue
+
+                    cand_path = cand_meta.get("path", "")
+                    cand_img = img_cache.get(cand_path)
+                    if cand_img is None:
+                        logger.warning(
+                            "Candidate %s (%s) not found on disk, skipping", cand_idx, cand_path
+                        )
+                        continue
+
+                    cand_fname = cand_meta.get("filename", "")
+                    cand_phash_dist = candidate_dists[cand_idx]
+                    cand_dhash = cand_meta.get("dhash", "")
+                    cand_dhash_dist = 999
+                    if seed_meta.get("dhash") and cand_dhash:
+                        cand_dhash_dist = hamming_distance(seed_meta["dhash"], cand_dhash)
+
+                    # Strict pixel-level verification via DiffMaskVerifier (NO shortcuts)
+                    t_ver_0 = time.perf_counter()
+                    verification = verifier.verify(seed_img, cand_img)
+                    t_verify_total += time.perf_counter() - t_ver_0
+                    total_pairs_verified += 1
+
+                    # Match criteria strictly respect configured max_diff_ratio (NO bypass)
+                    is_match = verification.diff_ratio <= max_diff_ratio
+                    match_level = target_match_level if is_match else "none"
+
+                    if is_match:
+                        matching_members.append(
+                            {
+                                "id": cand_idx,
+                                "filename": cand_fname,
+                                "datasource": datasource,
+                                "dhash_distance": cand_dhash_dist,
+                                "phash_distance": cand_phash_dist,
+                                "verifier_score": round(float(verification.score), 4),
+                                "diff_ratio": round(float(verification.diff_ratio), 4),
+                                "match_level": match_level,
+                                "path": cand_path,
+                            }
+                        )
+                        if len(matching_members) >= target_candidates:
+                            break
+
+            # Stop only when verified matches fill batch, or search exhausted,
+            # or monotonic Hamming distance strictly exceeds threshold.
             if (
-                len(candidate_ids) >= target_candidates
+                seed_img_missing
+                or len(matching_members) >= target_candidates
                 or curr_k >= total_items
                 or max_recalled_dist > max_hamming
             ):
                 break
 
-            # Exponentially expand recall window to bypass eliminated ghost items
+            # Exponentially expand recall window to bypass eliminated or rejected items
             curr_k = min(total_items, max(curr_k * 2, curr_k + 16))
 
-        total_candidates_recalled += len(candidate_ids)
-
-        if not candidate_ids:
+        if seed_img_missing:
             unvisited.discard(seed_idx)
             continue
-
-        # Gather paths for parallel image loading
-        seed_path = seed_meta.get("path", "")
-        cand_metas: dict[int, dict] = {}
-        paths_to_load: list[str] = []
-
-        if seed_path and seed_path not in img_cache and Path(seed_path).exists():
-            paths_to_load.append(seed_path)
-
-        for cand_idx in candidate_ids:
-            c_meta = active_indexer.get_metadata(cand_idx, datasource=datasource)
-            if c_meta:
-                cand_metas[cand_idx] = c_meta
-                c_path = c_meta.get("path", "")
-                if c_path and c_path not in img_cache and Path(c_path).exists():
-                    paths_to_load.append(c_path)
-
-        # Batch load missing images in parallel with deduplication
-        if paths_to_load:
-            paths_to_load = list(dict.fromkeys(paths_to_load))
-            t_io_0 = time.perf_counter()
-            loaded_imgs, ok_paths, _ = load_images(paths_to_load)
-            for p, img in zip(ok_paths, loaded_imgs):
-                img_cache[p] = img
-            total_images_loaded += len(ok_paths)
-            t_io_total += time.perf_counter() - t_io_0
-
-        # Retrieve seed image from cache
-        seed_img = img_cache.get(seed_path)
-        if seed_img is None:
-            logger.warning(
-                "Seed texture %s (%s) not found on disk, skipping probe", seed_idx, seed_path
-            )
-            unvisited.discard(seed_idx)
-            continue
-
-        matching_members: list[dict[str, Any]] = []
-        for cand_idx in candidate_ids:
-            cand_meta = cand_metas.get(cand_idx)
-            if not cand_meta:
-                continue
-
-            cand_path = cand_meta.get("path", "")
-            cand_img = img_cache.get(cand_path)
-            if cand_img is None:
-                logger.warning("Candidate %s (%s) not found on disk, skipping", cand_idx, cand_path)
-                continue
-
-            cand_fname = cand_meta.get("filename", "")
-            cand_phash_dist = candidate_dists[cand_idx]
-            cand_dhash = cand_meta.get("dhash", "")
-            cand_dhash_dist = 999
-            if seed_meta.get("dhash") and cand_dhash:
-                cand_dhash_dist = hamming_distance(seed_meta["dhash"], cand_dhash)
-
-            # Strict pixel-level verification via DiffMaskVerifier (NO shortcuts)
-            t_ver_0 = time.perf_counter()
-            verification = verifier.verify(seed_img, cand_img)
-            t_verify_total += time.perf_counter() - t_ver_0
-            total_pairs_verified += 1
-
-            # Match criteria strictly respect configured max_diff_ratio (NO bypass)
-            is_match = verification.diff_ratio <= max_diff_ratio
-            match_level = target_match_level if is_match else "none"
-
-            if is_match:
-                matching_members.append(
-                    {
-                        "id": cand_idx,
-                        "filename": cand_fname,
-                        "datasource": datasource,
-                        "dhash_distance": cand_dhash_dist,
-                        "phash_distance": cand_phash_dist,
-                        "verifier_score": round(float(verification.score), 4),
-                        "diff_ratio": round(float(verification.diff_ratio), 4),
-                        "match_level": match_level,
-                        "path": cand_path,
-                    }
-                )
-                if len(matching_members) >= batch_size - 1:
-                    break
 
         # If we successfully formed a cluster (seed + >= 1 verified peer)
         if matching_members:

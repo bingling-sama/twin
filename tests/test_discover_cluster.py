@@ -18,7 +18,12 @@ from twin.core.config import settings
 from twin.main import app
 from twin.services.cluster import discover_similar_batches
 from twin.services.embedding import get_embedding_dim
-from twin.services.hasher import compute_ahash, compute_dhash, compute_phash
+from twin.services.hasher import (
+    compute_ahash,
+    compute_dhash,
+    compute_phash,
+    hamming_distance,
+)
 from twin.services.indexer import indexer
 from twin.services.verifiers import DiffMaskVerifier
 
@@ -653,3 +658,87 @@ def test_discover_response_schema_validation():
                 "recall": {"probes_evaluated": "not_an_int"},
             },
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "err_fragment"),
+    [
+        ({"datasource": "invalid"}, "Unsupported datasource"),
+        ({"mode": "invalid"}, "Unsupported discovery mode"),
+        ({"seed_strategy": "invalid"}, "Unsupported seed strategy"),
+        ({"batch_size": 1}, "batch_size must be >= 2"),
+        ({"batch_size": 0}, "batch_size must be >= 2"),
+        ({"max_batches": 0}, "max_batches must be >= 1"),
+        ({"max_probes": 0}, "max_probes must be >= 1"),
+    ],
+)
+def test_discover_invalid_parameters(kwargs, err_fragment):
+    """Service entry point must reject out-of-domain parameters loudly."""
+    with pytest.raises(ValueError, match=err_fragment):
+        discover_similar_batches(**kwargs)
+
+
+def test_discover_expands_past_rejected_phash_false_positives(tmp_path):
+    """Adaptive recall must expand curr_k when initial candidates fail DiffMask verification."""
+    verifier = DiffMaskVerifier()
+
+    # Build rich spatially textured seed so DCT pHash has non-trivial structure
+    rng = np.random.default_rng(42)
+    base_rgb = np.zeros((64, 64, 4), dtype=np.uint8)
+    for by in range(0, 64, 8):
+        for bx in range(0, 64, 8):
+            g_val = int(rng.integers(40, 210))
+            base_rgb[by : by + 8, bx : bx + 8] = [100, g_val, 100, 255]
+    seed_img = Image.fromarray(base_rgb, mode="RGBA")
+    seed_ph = compute_phash(seed_img)
+
+    _index_skin(seed_img, "seed.png", tmp_path)
+
+    # Create >= discover_min_recall_k luma-preserving RGB shifts (pHash dist=0, diff_ratio > 0.05)
+    min_k = max(2 * settings.discover_recall_multiplier, settings.discover_min_recall_k)
+    false_count = min_k + 2
+    for i in range(false_count):
+        arr = base_rgb.copy()
+        row_start = (i * 3) % 32
+        arr[row_start : row_start + 32, :, 0] = arr[row_start : row_start + 32, :, 0] + 20
+        arr[row_start : row_start + 32, :, 2] = arr[row_start : row_start + 32, :, 2] - 52
+        false_img = Image.fromarray(arr, mode="RGBA")
+        assert hamming_distance(seed_ph, compute_phash(false_img)) == 0
+        assert verifier.verify(seed_img, false_img).diff_ratio > 0.05
+        _index_skin(false_img, f"false_{i:02d}.png", tmp_path)
+
+    # Create a real confirmed match at pHash distance 2..4 so it sits strictly behind dist=0 items
+    match_img = None
+    for attempt in range(500):
+        cand = base_rgb.copy()
+        py = int(rng.integers(0, 56))
+        px = int(rng.integers(0, 56))
+        cand[py : py + 4, px : px + 4, :3] = [
+            int(rng.integers(0, 255)),
+            int(rng.integers(0, 255)),
+            int(rng.integers(0, 255)),
+        ]
+        cand_img = Image.fromarray(cand, mode="RGBA")
+        dist = hamming_distance(seed_ph, compute_phash(cand_img))
+        if 1 <= dist <= settings.discover_confirmed_hamming and (
+            verifier.verify(seed_img, cand_img).diff_ratio <= settings.discover_confirmed_diff_ratio
+        ):
+            match_img = cand_img
+            break
+    assert match_img is not None, f"Failed to craft test match after {attempt + 1} attempts"
+    _index_skin(match_img, "true_match.png", tmp_path)
+
+    # Single probe on id=0 must expand curr_k past min_k rejected dist=0 items to reach true_match
+    res = discover_similar_batches(
+        datasource="skin",
+        max_batches=1,
+        batch_size=2,
+        mode="confirmed",
+        max_probes=1,
+        seed_strategy="sequential",
+    )
+
+    assert res["count"] == 1
+    batch = res["batches"][0]
+    assert batch["seed"]["filename"] == "seed.png"
+    assert [m["filename"] for m in batch["members"]] == ["true_match.png"]

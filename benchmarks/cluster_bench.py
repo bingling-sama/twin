@@ -12,18 +12,22 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import PIL
+# Initialize OpenMP thread controls before importing faiss/torch/numpy.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import numpy as np  # noqa: E402
+import PIL  # noqa: E402
 
 # Ensure workspace root is in sys.path
 _ROOT = Path(__file__).resolve().parent.parent
@@ -44,24 +48,47 @@ from benchmarks.cluster.dataset import (  # noqa: E402
 )
 from benchmarks.cluster.evaluator import (  # noqa: E402
     ScenarioResult,
+    assess_quality_risk,
     evaluate_cluster_scenario,
+    summarize_stage_breakdown,
+)
+from benchmarks.cluster.meta import (  # noqa: E402
+    compute_cluster_source_digest,
+    get_cluster_dataset_fingerprint,
 )
 from twin.core.config import settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cluster_bench")
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_EXPECTED_SCENARIO_NAMES: tuple[str, ...] = (
+    "Exact Duplicate Swarms",
+    "Massive 50-Skin Duplicate Swarm",
+    "Derivative Variant Clusters",
+    "Sparse Real Haystack (Confirmed)",
+    "Sparse Real Haystack (Variants)",
+    "Sequential Seed Strategy",
+    "Threshold Boundary Gating (Confirmed)",
+    "Threshold Boundary Gating (Variants)",
+    "Anti-Transitivity Elimination",
+    "Adversarial Torture Suite",
+)
 
-def _compute_source_digest(paths: list[Path]) -> str:
-    """Compute combined SHA-256 digest over core implementation and benchmark harness files."""
-    digest = hashlib.sha256()
-    for p in sorted(paths):
-        digest.update(p.relative_to(_ROOT).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        if p.is_file():
-            digest.update(p.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()[:16]
+
+def _git_head_and_clean(repo_root: Path = _ROOT) -> tuple[str, bool]:
+    """Return (full_head_sha, is_clean) from git for report provenance checks."""
+    commit = (
+        subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root, stderr=subprocess.DEVNULL
+        )
+        .decode("ascii")
+        .strip()
+    )
+    dirty_out = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=repo_root, stderr=subprocess.DEVNULL
+    ).decode("utf-8", errors="replace")
+    return commit, not bool(dirty_out.strip())
 
 
 def get_environment_metadata(
@@ -71,29 +98,14 @@ def get_environment_metadata(
 ) -> dict[str, str]:
     """Capture execution environment metadata for strict benchmark reproducibility."""
     try:
-        commit = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
-            )
-            .decode("ascii")
-            .strip()
-        )
-        dirty_out = subprocess.check_output(
-            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL
-        ).decode("utf-8", errors="replace")
-        dirty_tag = " (dirty)" if dirty_out.strip() else " (clean)"
+        commit, is_clean = _git_head_and_clean(_ROOT)
+        dirty_tag = " (clean)" if is_clean else " (dirty)"
     except Exception:
         commit = "unknown"
         dirty_tag = ""
 
-    source_digest = _compute_source_digest(
-        [
-            _ROOT / "src" / "twin" / "services" / "cluster.py",
-            _ROOT / "benchmarks" / "cluster" / "dataset.py",
-            _ROOT / "benchmarks" / "cluster" / "evaluator.py",
-            _ROOT / "benchmarks" / "cluster_bench.py",
-        ]
-    )
+    source_digest = compute_cluster_source_digest()
+    dataset_fingerprint = get_cluster_dataset_fingerprint()
 
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
@@ -122,7 +134,8 @@ def get_environment_metadata(
         "Generated At": now_iso,
         "Commit SHA": f"{commit}{dirty_tag}",
         "Source Digest (SHA-256)": source_digest,
-        "Python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "Dataset Fingerprint (SHA-256)": dataset_fingerprint,
+        "Python": platform.python_version(),
         "OS Platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
         "CPU": f"{cpu_info} ({cpu_cores} logical cores)",
         "GPU": gpu_info,
@@ -174,16 +187,18 @@ def format_markdown_report(
     lines.append(
         "> **Note on Latencies & Rates**: "
         "`Latency` reports `Median (P95) [Min - Max]` wall-clock ms over `Statistical Rounds`. "
-        "Throughput (`prob/s`) uses `end_to_end_ms` as the strict denominator. "
-        "`Coverage` counts all recovered GT cluster members (seeds + peers)."
+        "Throughput (`prob/s` and `pairs/s`) uses `end_to_end_ms` as the strict denominator. "
+        "`Coverage` counts all recovered GT cluster members (seeds + peers). "
+        "`Quality Risk` flags scenarios with wrong peers, impure batches, recall < 100%, "
+        "or coverage < 100%."
     )
     lines.append("")
     lines.append(
         "| Scenario | Mode | Scale (Items/GT) | Wall Latency Med/P95 [Min-Max] | Throughput | "
-        "Formed Batches | Purity (Wrong) | Coverage | Recall |"
+        "Formed Batches | Purity / Impure Rate (Wrong) | Coverage | Recall | Quality Risk |"
     )
     lines.append(
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
     )
 
     for r, stats in results_with_stats:
@@ -192,13 +207,15 @@ def format_markdown_report(
         p95_lat = float(stats.get("p95_ms", r.end_to_end_ms))
         min_lat = float(stats.get("min_ms", r.end_to_end_ms))
         max_lat = float(stats.get("max_ms", r.end_to_end_ms))
+        risk_flags = assess_quality_risk(r)
+        risk_badge = f"RISK: {', '.join(risk_flags)}" if risk_flags else "Clean"
         lines.append(
             f"| **{r.scenario_name}** | `{r.mode}` | {scale_str} | "
             f"**{med_lat:.1f}ms** ({p95_lat:.1f}ms) [{min_lat:.1f}-{max_lat:.1f}] | "
             f"{r.probes_per_sec:,.0f} prob/s | "
             f"{r.discovered_batches} batches ({r.total_discovered_members} skins) | "
-            f"**{r.avg_batch_purity:.1%}** ({r.wrong_peer_count}) | "
-            f"{r.member_coverage_rate:.1%} | **{r.cluster_recall_rate:.1%}** |"
+            f"**{r.avg_batch_purity:.1%}** / {r.impure_batch_rate:.1%} ({r.wrong_peer_count}) | "
+            f"{r.member_coverage_rate:.1%} | **{r.cluster_recall_rate:.1%}** | `{risk_badge}` |"
         )
 
     lines.append("")
@@ -224,31 +241,29 @@ def format_markdown_report(
         "> **Decomposition**: "
         "`end_to_end_ms` = `instrumented_stage_ms` (`recall` + `io` + `verify`) "
         "+ `unattributed_ms` (loop branching, metadata lookups, elimination, harness overhead); "
-        "`service_query_ms` records internal `discover_similar_batches()` elapsed time."
+        "`service_query_ms` records internal `discover_similar_batches()` elapsed time; "
+        "`pairs/s` uses `end_to_end_ms` as denominator."
     )
     lines.append("")
     lines.append(
-        "| Scenario | Service / Wall | Binary Recall | Parallel I/O | DiffMask Verify | "
-        "Unattributed (e2e) | Verified Pairs |"
+        "| Scenario | Service / Stages / Wall | Binary Recall | Parallel I/O | "
+        "DiffMask Verify | Unattributed (e2e) | Verified Pairs (e2e) |"
     )
     lines.append(
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
     )
 
     for r, _ in results_with_stats:
-        st = r.stages
-        rec_ms = float(st.get("recall", {}).get("elapsed_ms", 0.0))
-        io_ms = float(st.get("io_load", {}).get("elapsed_ms", 0.0))
-        ver_ms = float(st.get("verify", {}).get("elapsed_ms", 0.0))
-        tot_stage = max(rec_ms + io_ms + ver_ms, 0.001)
-
+        bd = summarize_stage_breakdown(r.stages)
         lines.append(
-            f"| `{r.scenario_name}` | {r.service_query_ms:.1f}ms / {r.end_to_end_ms:.1f}ms | "
-            f"{rec_ms:.1f}ms ({(rec_ms / tot_stage) * 100:.1f}%) | "
-            f"{io_ms:.1f}ms ({(io_ms / tot_stage) * 100:.1f}%) | "
-            f"{ver_ms:.1f}ms ({(ver_ms / tot_stage) * 100:.1f}%) | "
+            f"| `{r.scenario_name}` | "
+            f"{r.service_query_ms:.1f}ms / {r.instrumented_stage_ms:.1f}ms / "
+            f"{r.end_to_end_ms:.1f}ms | "
+            f"{bd['recall_ms']:.1f}ms ({bd['recall_pct']:.1f}%) | "
+            f"{bd['io_ms']:.1f}ms ({bd['io_pct']:.1f}%) | "
+            f"{bd['verify_ms']:.1f}ms ({bd['verify_pct']:.1f}%) | "
             f"{r.unattributed_ms:.1f}ms | "
-            f"{r.pairs_verified} ({r.pairs_per_sec:,.0f} pairs/s) |"
+            f"{r.pairs_verified} ({r.pairs_per_sec:,.0f} pairs/s, denominator: end_to_end_ms) |"
         )
 
     lines.append("")
@@ -342,7 +357,119 @@ def _run_and_record(
     )
 
 
-def main() -> None:
+def _parse_metadata_table(report_text: str) -> dict[str, str]:
+    """Parse **Key** | `Value` metadata rows from markdown report."""
+    meta: dict[str, str] = {}
+    row_re = re.compile(r"^\|\s*\*\*(.+?)\*\*\s*\|\s*`(.*)`\s*\|\s*$")
+    for line in report_text.splitlines():
+        match = row_re.match(line.strip())
+        if match:
+            meta[match.group(1).strip()] = match.group(2).strip()
+    return meta
+
+
+def verify_cluster_report(
+    report_path: Path | str,
+    *,
+    repo_root: Path = _ROOT,
+) -> list[str]:
+    """Verify report completeness, clean Commit SHA == HEAD, and full SHA-256 digests."""
+    path = Path(report_path)
+    if not path.is_file():
+        return [f"Report file not found: {path}"]
+
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return [f"Report file is empty: {path}"]
+
+    errors: list[str] = []
+    meta = _parse_metadata_table(text)
+    required_meta_keys = (
+        "Generated At",
+        "Commit SHA",
+        "Source Digest (SHA-256)",
+        "Dataset Fingerprint (SHA-256)",
+        "Python",
+        "OS Platform",
+        "CPU",
+        "GPU",
+        "Torch / Faiss / Pillow",
+        "Statistical Rounds",
+        "Haystack Config",
+        "images.zip Fingerprint",
+        "Confirmed Thresholds",
+        "Variants Thresholds",
+        "Recall Window",
+    )
+    for key in required_meta_keys:
+        if not meta.get(key):
+            errors.append(f"Missing required report metadata field: {key}")
+
+    try:
+        head_sha, repo_clean = _git_head_and_clean(repo_root)
+    except Exception as exc:
+        errors.append(f"Failed to query git HEAD/status for report verification: {exc}")
+        head_sha, repo_clean = "", False
+
+    if head_sha:
+        expected_commit = f"{head_sha} (clean)"
+        recorded_commit = meta.get("Commit SHA", "")
+        if recorded_commit != expected_commit:
+            errors.append(
+                f"Report Commit SHA mismatch or dirty state: expected {expected_commit!r}, "
+                f"got {recorded_commit!r}"
+            )
+        if not repo_clean:
+            errors.append(
+                "Working tree is dirty; commit or clean changes before certifying report."
+            )
+
+    expected_src = compute_cluster_source_digest()
+    recorded_src = meta.get("Source Digest (SHA-256)", "")
+    if not _SHA256_RE.match(recorded_src):
+        errors.append(
+            f"Report Source Digest must be full 64-char SHA-256 hex, got {recorded_src!r}"
+        )
+    elif recorded_src != expected_src:
+        errors.append(
+            f"Report Source Digest mismatch: expected {expected_src}, got {recorded_src}"
+        )
+
+    expected_ds = get_cluster_dataset_fingerprint()
+    recorded_ds = meta.get("Dataset Fingerprint (SHA-256)", "")
+    if not _SHA256_RE.match(recorded_ds):
+        errors.append(
+            f"Report Dataset Fingerprint must be full 64-char SHA-256 hex, got {recorded_ds!r}"
+        )
+    elif recorded_ds != expected_ds:
+        errors.append(
+            f"Report Dataset Fingerprint mismatch: expected {expected_ds}, got {recorded_ds}"
+        )
+
+    required_sections = (
+        "## 🖥️ Execution Environment Metadata",
+        "## 🏆 Executive Summary & Strategy Matrix",
+        "## 🔧 Scenario Reproducibility Matrix",
+        "## 🔬 Telemetry & Fine-Grained Latency Decomposition",
+        "## 📝 Detailed Scenario Analysis",
+    )
+    for section in required_sections:
+        if section not in text:
+            errors.append(f"Missing required report section: {section}")
+
+    for scenario_name in _EXPECTED_SCENARIO_NAMES:
+        if f"| **{scenario_name}** |" not in text:
+            errors.append(f"Missing Executive Summary row for scenario: {scenario_name}")
+        if f"### Scenario: {scenario_name} " not in text:
+            errors.append(f"Missing Detailed Scenario section for: {scenario_name}")
+
+    if "denominator: end_to_end_ms" not in text or "instrumented stages:" not in text:
+        errors.append("Missing explicit denominator or instrumented stage breakdown labels.")
+
+    return errors
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Similarity Discovery Benchmarks")
     parser.add_argument("--samples", type=int, default=200, help="Background scale for haystack")
     parser.add_argument("--rounds", type=int, default=3, help="Statistical evaluation rounds")
@@ -352,7 +479,23 @@ def main() -> None:
     parser.add_argument(
         "--no-zip", action="store_true", help="Force synthetic fallback instead of images.zip"
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--verify-report",
+        type=str,
+        default=None,
+        help="Verify an existing cluster_report.md against HEAD, clean status, and SHA-256 digests",
+    )
+    args = parser.parse_args(argv)
+
+    if args.verify_report:
+        errors = verify_cluster_report(args.verify_report)
+        if errors:
+            print("CLUSTER REPORT VERIFICATION FAILED:", file=sys.stderr)
+            for err in errors:
+                print(f"  - {err}", file=sys.stderr)
+            return 1
+        print(f"CLUSTER REPORT VERIFIED CLEAN: {args.verify_report}")
+        return 0
 
     use_zip = not args.no_zip
     logger.info("Initializing Similarity Discovery Benchmark Suite...")
@@ -555,7 +698,8 @@ def main() -> None:
     out_path.write_text(md_report, encoding="utf-8")
     logger.info("Benchmark report generated successfully at: %s", out_path)
     print("\n" + md_report)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

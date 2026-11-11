@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from twin.core.types import ClusterMatchLevel, DatasourceType, DiscoveryMode
+
 
 # --- Search ---
 class SearchResultItem(BaseModel):
@@ -186,9 +188,6 @@ class ErrorResponse(BaseModel):
 
 
 # --- Seedless Discovery ---
-DatasourceType = Literal["skin", "cape"]
-DiscoveryMode = Literal["confirmed", "variants"]
-ClusterMatchLevel = Literal["confirmed", "suspected"]
 VerifierType = Literal["DiffMaskVerifier", "SSIMVerifier"]
 
 

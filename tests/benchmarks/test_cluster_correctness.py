@@ -1,16 +1,11 @@
-"""Benchmarks and correctness tests for seedless texture discovery via Greedy Leader Elimination.
+"""Correctness, metric, boundary, and contract tests for seedless discovery (Gates 2 & 3).
 
-Four-tiered verification:
-  1. Performance Benchmarks: Integrates with pytest-benchmark (--benchmark-only)
-  2. Memory & Disk Sentinel Isolation: Verifies global indexer singleton & host disk are untouched
-  3. Deterministic Reproducibility: Verifies identical batches with fixed PRNG seed
-  4. Mathematical Contracts & Boundaries: Verifies strict threshold rejection & anti-transitivity
+Runs without pytest-benchmark fixture or @pytest.mark.smoke so performance timing runs
+and correctness verification remain cleanly separated.
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
 from pathlib import Path
 from typing import Any
 
@@ -29,28 +24,14 @@ from benchmarks.cluster.dataset import (
     verify_variant_contracts,
 )
 from benchmarks.cluster.evaluator import (
-    _prod_data_dir,
+    ScenarioResult,
+    assess_quality_risk,
     evaluate_cluster_scenario,
-    isolated_index_environment,
     populate_cluster_index,
+    summarize_stage_breakdown,
 )
-from twin.core.config import settings
 from twin.services.cluster import discover_similar_batches
-from twin.services.embedding import get_embedding_dim
-from twin.services.indexer import Indexer, indexer
-
-try:
-    import pytest_benchmark  # noqa: F401
-except ImportError:
-
-    @pytest.fixture
-    def benchmark():
-        """Fallback runner when pytest-benchmark is not installed."""
-
-        def _runner(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        return _runner
+from twin.services.indexer import Indexer
 
 
 def _build_cluster_dataset(
@@ -58,10 +39,9 @@ def _build_cluster_dataset(
     num_variants: int = 15,
     num_noise: int = 25,
 ) -> list[BenchmarkItem]:
-    """Generate in-memory benchmark items for test population."""
+    """Generate in-memory benchmark items for correctness tests."""
     items: list[BenchmarkItem] = []
 
-    # 1. Duplicates
     base_dup = create_base_skin(seed=42)
     for i in range(num_duplicates):
         items.append(
@@ -72,7 +52,6 @@ def _build_cluster_dataset(
             )
         )
 
-    # 2. Variants (with physical contract verification)
     base_var = create_base_skin(seed=100)
     var_imgs = [create_variant_skin(base_var, variant_idx=i + 1) for i in range(num_variants)]
     if var_imgs:
@@ -86,7 +65,6 @@ def _build_cluster_dataset(
             )
         )
 
-    # 3. Noise
     for i in range(num_noise):
         noise_img = create_base_skin(seed=1000 + i * 17)
         items.append(
@@ -100,34 +78,27 @@ def _build_cluster_dataset(
     return items
 
 
-def _run_benchmarked_discovery(
-    benchmark: Any,
+def _run_sandbox_discovery(
     tmp_path: Path,
     items: list[BenchmarkItem],
     **discover_kwargs: Any,
 ) -> dict[str, Any]:
-    """Populate a fresh sandbox Indexer inside an isolated dir and run benchmark."""
-    img_dir = tmp_path / "images"
-    idx_dir = tmp_path / "index"
+    """Populate a fresh isolated Indexer and execute discover_similar_batches."""
     sandbox = Indexer()
-    with isolated_index_environment(index_dir=idx_dir):
-        populate_cluster_index(
-            items, tmp_dir=img_dir, datasource="skin", indexer_instance=sandbox
-        )
-        return benchmark(
-            discover_similar_batches,
-            datasource="skin",
-            indexer_instance=sandbox,
-            **discover_kwargs,
-        )
+    populate_cluster_index(
+        items, tmp_dir=tmp_path / "images", datasource="skin", indexer_instance=sandbox
+    )
+    return discover_similar_batches(
+        datasource="skin",
+        indexer_instance=sandbox,
+        **discover_kwargs,
+    )
 
 
-@pytest.mark.smoke
-def test_bench_cluster_confirmed_duplicates(benchmark, tmp_path: Path) -> None:
-    """Benchmark confirmed mode: pure duplicates discovery with zero diff."""
+def test_cluster_confirmed_duplicates_correctness(tmp_path: Path) -> None:
+    """Verify confirmed mode recovers pure duplicate batches with zero pixel diff."""
     items = _build_cluster_dataset(num_duplicates=25, num_variants=0, num_noise=20)
-    res = _run_benchmarked_discovery(
-        benchmark,
+    res = _run_sandbox_discovery(
         tmp_path,
         items,
         max_batches=10,
@@ -140,19 +111,17 @@ def test_bench_cluster_confirmed_duplicates(benchmark, tmp_path: Path) -> None:
 
     batches = res["batches"]
     assert len(batches) >= 4
-    for b in batches:
-        assert b["mode"] == "confirmed"
-        assert b["max_diff_ratio"] <= 0.05
-        for m in b["members"]:
-            assert m["diff_ratio"] == 0.0
+    for batch in batches:
+        assert batch["mode"] == "confirmed"
+        assert batch["max_diff_ratio"] <= 0.05
+        for member in batch["members"]:
+            assert member["diff_ratio"] == 0.0
 
 
-@pytest.mark.smoke
-def test_bench_cluster_adaptive_recall_scaling(benchmark, tmp_path: Path) -> None:
-    """Benchmark adaptive recall expansion on a large swarm of 50 identical duplicates."""
+def test_cluster_adaptive_recall_scaling_correctness(tmp_path: Path) -> None:
+    """Verify adaptive recall expansion across a 50-item identical duplicate swarm."""
     items = _build_cluster_dataset(num_duplicates=50, num_variants=0, num_noise=10)
-    res = _run_benchmarked_discovery(
-        benchmark,
+    res = _run_sandbox_discovery(
         tmp_path,
         items,
         max_batches=20,
@@ -165,20 +134,17 @@ def test_bench_cluster_adaptive_recall_scaling(benchmark, tmp_path: Path) -> Non
 
     batches = res["batches"]
     assert len(batches) == 10
-    total_items_in_batches = sum(b["size"] for b in batches)
-    assert total_items_in_batches == 50
+    assert sum(b["size"] for b in batches) == 50
 
     stages = res["stages"]
     assert stages["recall"]["probes_evaluated"] >= 10
     assert stages["verify"]["batches_formed"] == 10
 
 
-@pytest.mark.smoke
-def test_bench_cluster_variants_mode(benchmark, tmp_path: Path) -> None:
-    """Benchmark variants mode on recolored derivative textures."""
+def test_cluster_variants_mode_correctness(tmp_path: Path) -> None:
+    """Verify variants mode discovers recolored derivative batches within diff bounds."""
     items = _build_cluster_dataset(num_duplicates=10, num_variants=20, num_noise=20)
-    res = _run_benchmarked_discovery(
-        benchmark,
+    res = _run_sandbox_discovery(
         tmp_path,
         items,
         max_batches=10,
@@ -191,159 +157,9 @@ def test_bench_cluster_variants_mode(benchmark, tmp_path: Path) -> None:
 
     batches = res["batches"]
     assert len(batches) >= 2
-    for b in batches:
-        assert b["mode"] == "variants"
-        assert b["max_diff_ratio"] <= 0.35
-
-
-def _snapshot_files(root: Path) -> dict[Path, tuple[int, int, str | None]]:
-    """Capture fast state of index artifacts while skipping huge image-corpus trees."""
-    if not root.is_dir():
-        return {}
-    state: dict[Path, tuple[int, int, str | None]] = {}
-
-    def _record_file(p: Path) -> None:
-        st = p.stat()
-        digest = (
-            hashlib.sha256(p.read_bytes()).hexdigest()
-            if st.st_size <= 16 * 1024 * 1024
-            else None
-        )
-        state[p.relative_to(root)] = (st.st_size, st.st_mtime_ns, digest)
-
-    for entry in root.iterdir():
-        if entry.is_file():
-            _record_file(entry)
-        elif entry.is_dir():
-            if entry.name == "images":
-                st = entry.stat()
-                state[entry.relative_to(root)] = (0, st.st_mtime_ns, "dir:images")
-                continue
-            for p in entry.rglob("*"):
-                if p.is_file():
-                    _record_file(p)
-    return state
-
-
-def test_cluster_memory_and_disk_isolation_sentinel(tmp_path: Path) -> None:
-    """Verify benchmark execution preserves active/host disk files and memory singleton."""
-    orig_path = settings.index_path
-    orig_env = os.environ.get("TWIN_INDEX_PATH")
-    orig_dir = settings.index_dir.resolve()
-    orig_files = _snapshot_files(orig_dir)
-
-    host_dir = tmp_path / "host_data"
-    host_dir.mkdir(parents=True)
-    sentinel_file = host_dir / "sentinel.txt"
-    sentinel_file.write_text("CRITICAL_HOST_INDEX_DATA", encoding="utf-8")
-
-    sentinel_faiss = host_dir / "skin" / "index.flat.faiss"
-    sentinel_faiss.parent.mkdir(parents=True)
-    sentinel_faiss.write_text("FAISS_BINARY_CONTENT", encoding="utf-8")
-
-    sentinel_meta = host_dir / "skin" / "metadata.flat.json"
-    sentinel_meta.write_text('[{"filename": "host_meta_0.png"}]', encoding="utf-8")
-
-    empty_stage = tmp_path / "empty_stage"
-    empty_stage.mkdir(parents=True)
-
-    with indexer._lock:
-        saved_indices = dict(indexer._indices)
-        saved_binary = dict(indexer._binary_indices)
-        saved_meta = {k: [dict(m) for m in v] for k, v in indexer._metadatas.items()}
-        saved_dirty = dict(indexer._dirty_flags)
-        indexer._indices = {}
-        indexer._binary_indices = {}
-        indexer._metadatas = {}
-        indexer._dirty_flags = {ds: False for ds in indexer.KNOWN_DATASOURCES}
-
-    try:
-        # Populate isolated in-memory singleton without touching disk
-        settings.index_path = str(empty_stage)
-        dummy_vec = np.zeros(get_embedding_dim(), dtype=np.float32)
-        for i in range(10):
-            indexer.add_item(
-                dummy_vec,
-                {"filename": f"host_singleton_{i}.png", "path": f"/host/{i}.png"},
-                datasource="skin",
-            )
-        assert indexer.get_count("skin") == 10
-
-        # Point active settings/env to host_dir containing sentinel disk artifacts
-        settings.index_path = str(host_dir)
-        os.environ["TWIN_INDEX_PATH"] = str(host_dir)
-
-        items = _build_cluster_dataset(num_duplicates=10, num_variants=0, num_noise=5)
-        res = evaluate_cluster_scenario(
-            scenario_name="Sentinel Host Protection Test",
-            items=items,
-            ground_truth_counts={"cluster_dup_1": 10},
-            mode="confirmed",
-            max_batches=5,
-            batch_size=5,
-        )
-        assert res.discovered_batches == 2
-
-        # Assert host sentinel files (including metadata.flat.json) are byte-identical
-        assert sentinel_file.read_text(encoding="utf-8") == "CRITICAL_HOST_INDEX_DATA"
-        assert sentinel_faiss.read_text(encoding="utf-8") == "FAISS_BINARY_CONTENT"
-        assert sentinel_meta.read_text(encoding="utf-8") == '[{"filename": "host_meta_0.png"}]'
-
-        # Assert pre-existing disk files in orig_dir were NEVER deleted or modified
-        assert _snapshot_files(orig_dir) == orig_files
-
-        # Assert global in-memory singleton remained unpolluted
-        assert indexer.get_count("skin") == 10
-        first_meta = indexer.get_metadata(0, datasource="skin")
-        assert first_meta is not None and first_meta["filename"] == "host_singleton_0.png"
-        assert settings.index_path == str(host_dir)
-        assert os.environ.get("TWIN_INDEX_PATH") == str(host_dir)
-    finally:
-        settings.index_path = orig_path
-        if orig_env is not None:
-            os.environ["TWIN_INDEX_PATH"] = orig_env
-        else:
-            os.environ.pop("TWIN_INDEX_PATH", None)
-        with indexer._lock:
-            indexer._indices = saved_indices
-            indexer._binary_indices = saved_binary
-            indexer._metadatas = saved_meta
-            indexer._dirty_flags = saved_dirty
-
-
-def test_isolated_index_environment_rejects_prod_and_active_host_dirs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Negative isolation tests: disallow data/ and currently active settings.index_dir."""
-    prod_dir = _prod_data_dir()
-    with pytest.raises(ValueError, match="production data directory"):
-        with isolated_index_environment(index_dir=prod_dir):
-            pass
-
-    with pytest.raises(ValueError, match="production data directory"):
-        with isolated_index_environment(index_dir=prod_dir / "skin"):
-            pass
-
-    active_dir = tmp_path / "active_host"
-    active_dir.mkdir(parents=True)
-    monkeypatch.setattr(settings, "index_path", str(active_dir))
-    with pytest.raises(ValueError, match="active host settings.index_dir"):
-        with isolated_index_environment(index_dir=active_dir):
-            pass
-
-
-def test_populate_cluster_index_rejects_singleton_or_duplicates(tmp_path: Path) -> None:
-    """Negative guards: reject global singleton, None, and duplicate filenames."""
-    items = _build_cluster_dataset(num_duplicates=2, num_variants=0, num_noise=0)
-    with isolated_index_environment(index_dir=tmp_path / "idx"):
-        with pytest.raises(ValueError, match="non-singleton Indexer"):
-            populate_cluster_index(items, tmp_dir=tmp_path / "img1", indexer_instance=None)
-        with pytest.raises(ValueError, match="non-singleton Indexer"):
-            populate_cluster_index(items, tmp_dir=tmp_path / "img2", indexer_instance=indexer)
-
-        dup_items = [items[0], items[0]]
-        with pytest.raises(ValueError, match="Duplicate benchmark filename"):
-            populate_cluster_index(dup_items, tmp_dir=tmp_path / "img3", indexer_instance=Indexer())
+    for batch in batches:
+        assert batch["mode"] == "variants"
+        assert batch["max_diff_ratio"] <= 0.35
 
 
 def test_cluster_deterministic_reproducibility() -> None:
@@ -370,6 +186,9 @@ def test_cluster_deterministic_reproducibility() -> None:
 
     assert res1.discovered_batches == res2.discovered_batches
     assert res1.avg_batch_purity == res2.avg_batch_purity
+    assert res1.impure_batches_count == res2.impure_batches_count
+    assert res1.impure_batch_rate == res2.impure_batch_rate
+    assert res1.wrong_peer_count == res2.wrong_peer_count
     assert res1.cluster_recall_rate == res2.cluster_recall_rate
     assert res1.member_coverage_rate == res2.member_coverage_rate
     assert res1.max_observed_diff_ratio == res2.max_observed_diff_ratio
@@ -393,10 +212,12 @@ def test_cluster_boundary_rejection(mode: str, max_diff: float) -> None:
 
     assert res.discovered_batches == 2
     assert res.avg_batch_purity == 1.0
+    assert res.impure_batch_rate == 0.0
     assert res.cluster_recall_rate == 1.0
     assert res.member_coverage_rate == 1.0
     assert res.wrong_peer_count == 0
     assert res.max_observed_diff_ratio <= max_diff
+    assert assess_quality_risk(res) == []
 
     clustered_names = {b["seed"] for b in res.normalized_batches} | {
         m["filename"] for b in res.normalized_batches for m in b["members"]
@@ -414,7 +235,7 @@ def test_cluster_boundary_rejection(mode: str, max_diff: float) -> None:
 def test_cluster_member_coverage_invariant_across_batch_sizes(batch_size: int) -> None:
     """Member coverage must equal 100% across batch_size=5/10/50 when all items are recovered."""
     items, gt_counts = build_duplicate_swarms_dataset(
-        swarm_sizes=[50], distractor_count=10, seed=701
+        swarm_sizes=(50,), distractor_count=10, seed=701
     )
     res = evaluate_cluster_scenario(
         scenario_name=f"Coverage Invariance bs={batch_size}",
@@ -429,11 +250,12 @@ def test_cluster_member_coverage_invariant_across_batch_sizes(batch_size: int) -
     assert res.cluster_recall_rate == 1.0
     assert res.member_coverage_rate == 1.0
     assert res.avg_batch_purity == 1.0
+    assert res.impure_batch_rate == 0.0
     assert res.wrong_peer_count == 0
 
 
 def test_cluster_noise_seed_purity_and_wrong_peer_accounting() -> None:
-    """Noise-seed batches must report purity=0.0 and count wrong peers accurately."""
+    """Noise-seed batches must report purity=0.0, impure_batch_rate=1.0, and wrong_peer_count."""
     base = create_base_skin(seed=801, valid_pixel_count=3000)
     arr = np.array(base).copy()
     coords = np.argwhere(arr[:, :, 3] > 10)
@@ -455,8 +277,105 @@ def test_cluster_noise_seed_purity_and_wrong_peer_accounting() -> None:
     )
     assert res.discovered_batches == 1
     assert res.avg_batch_purity == 0.0
+    assert res.perfect_batches_ratio == 0.0
     assert res.impure_batches_count == 1
+    assert res.impure_batch_rate == 1.0
     assert res.wrong_peer_count == 1
+
+
+def test_evaluator_impure_batch_rate_and_exact_purity_metrics() -> None:
+    """Mixed pure + impure batches must compute exact impure_batch_rate and risk flags."""
+    pure_img = create_base_skin(seed=910, valid_pixel_count=3000)
+
+    mixed_base = create_base_skin(seed=911, valid_pixel_count=3000)
+    arr = np.array(mixed_base).copy()
+    coords = np.argwhere(arr[:, :, 3] > 10)
+    for y, x in coords[:40]:
+        arr[y, x, 2] = (int(arr[y, x, 2]) + 25) % 256
+    mixed_noise = Image.fromarray(arr, mode="RGBA")
+
+    items = [
+        # Batch 1 (sequential idx 0..1): strictly pure GT cluster
+        BenchmarkItem(filename="pure_0.png", image=pure_img, cluster_id="gt_pure"),
+        BenchmarkItem(filename="pure_1.png", image=pure_img.copy(), cluster_id="gt_pure"),
+        # Batch 2 (sequential idx 2..4): 1 seed + 1 GT peer + 1 unlabeled wrong peer -> 2/3 pure
+        BenchmarkItem(filename="mix_seed.png", image=mixed_base, cluster_id="gt_mixed"),
+        BenchmarkItem(filename="mix_peer.png", image=mixed_base.copy(), cluster_id="gt_mixed"),
+        BenchmarkItem(filename="mix_noise.png", image=mixed_noise, cluster_id=None),
+    ]
+    res = evaluate_cluster_scenario(
+        scenario_name="Mixed Purity Metric Test",
+        items=items,
+        ground_truth_counts={"gt_pure": 2, "gt_mixed": 2},
+        mode="confirmed",
+        batch_size=5,
+        max_batches=5,
+        seed_strategy="sequential",
+    )
+
+    assert res.discovered_batches == 2
+    assert res.wrong_peer_count == 1
+    assert res.impure_batches_count == 1
+    assert res.perfect_batches_ratio == pytest.approx(0.5)
+    assert res.impure_batch_rate == pytest.approx(0.5)
+    assert res.avg_batch_purity == pytest.approx((1.0 + 2.0 / 3.0) / 2.0)
+
+    flags = assess_quality_risk(res)
+    assert any(flag.startswith("wrong_peers=1") for flag in flags)
+    assert any(flag.startswith("impure_rate=50.0%") for flag in flags)
+
+    md = res.to_markdown_summary()
+    assert "impure rate: 50.0%" in md
+    assert "instrumented stages:" in md
+    assert "denominator: end_to_end_ms" in md
+    assert "**Quality Risk**:" in md
+
+
+def test_summarize_stage_breakdown_and_quality_risk_helpers() -> None:
+    """Stage breakdown and quality risk helpers must calculate consistent shares and flags."""
+    breakdown = summarize_stage_breakdown(
+        {
+            "recall": {"elapsed_ms": 10.0},
+            "io_load": {"elapsed_ms": 20.0},
+            "verify": {"elapsed_ms": 70.0},
+        }
+    )
+    assert breakdown["instrumented_ms"] == pytest.approx(100.0)
+    assert breakdown["recall_pct"] == pytest.approx(10.0)
+    assert breakdown["io_pct"] == pytest.approx(20.0)
+    assert breakdown["verify_pct"] == pytest.approx(70.0)
+
+    degraded = ScenarioResult(
+        scenario_name="Degraded Sample",
+        mode="variants",
+        total_items=100,
+        gt_cluster_count=5,
+        discovered_batches=4,
+        total_discovered_members=12,
+        probes_evaluated=10,
+        service_query_ms=10.0,
+        end_to_end_ms=12.0,
+        instrumented_stage_ms=9.0,
+        unattributed_ms=3.0,
+        probes_per_sec=800.0,
+        pairs_verified=20,
+        pairs_per_sec=1600.0,
+        avg_batch_purity=0.95,
+        perfect_batches_ratio=0.75,
+        impure_batches_count=1,
+        impure_batch_rate=0.25,
+        cluster_recall_rate=0.80,
+        member_coverage_rate=0.60,
+        max_observed_diff_ratio=0.31,
+        wrong_peer_count=2,
+    )
+    flags = assess_quality_risk(degraded)
+    assert flags == [
+        "wrong_peers=2",
+        "impure_rate=25.0%",
+        "recall=80.0%",
+        "coverage=60.0%",
+    ]
 
 
 @pytest.mark.parametrize("mode", ["confirmed", "variants"])
@@ -476,6 +395,7 @@ def test_cluster_adversarial_torture_suite(mode: str) -> None:
     assert res.cluster_recall_rate == 1.0
     assert res.member_coverage_rate == 1.0
     assert res.avg_batch_purity == 1.0
+    assert res.impure_batch_rate == 0.0
     assert res.wrong_peer_count == 0
 
     clustered_names = {b["seed"] for b in res.normalized_batches} | {
@@ -497,9 +417,6 @@ def test_cluster_transitivity_chain_elimination() -> None:
     """Verify Greedy Leader Dynamic Elimination prevents non-transitive cluster collapse."""
     items, gt_counts = build_transitivity_chain_dataset(seed=501)
 
-    # A ~ B (~0.18), B ~ C (~0.30), A !~ C (~0.48)
-    # Under variants mode (threshold = 0.35):
-    # Cluster AB should form, B eliminated, C must NOT be in cluster AB
     res = evaluate_cluster_scenario(
         scenario_name="Transitivity Chain Test",
         items=items,
@@ -512,6 +429,7 @@ def test_cluster_transitivity_chain_elimination() -> None:
 
     assert res.discovered_batches == 1
     assert res.avg_batch_purity == 1.0
+    assert res.impure_batch_rate == 0.0
     assert res.cluster_recall_rate == 1.0
     assert res.member_coverage_rate == 1.0
     assert res.max_observed_diff_ratio <= 0.35
@@ -564,3 +482,4 @@ def test_evaluator_group_recovery_requires_peer() -> None:
         random_seed=42,
     )
     assert res.cluster_recall_rate == 0.0
+

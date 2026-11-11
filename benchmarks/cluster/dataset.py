@@ -15,6 +15,7 @@ import io
 import logging
 import random
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from twin.api.schemas import DiscoveryMode
+from twin.core.types import DiscoveryMode
 from twin.services.classifier import TextureKind, inspect_texture
 from twin.services.converter import single2double
 from twin.services.hasher import compute_phash, hamming_distance
@@ -236,7 +237,7 @@ def verify_variant_contracts(
 
 
 def build_duplicate_swarms_dataset(
-    swarm_sizes: list[int] = [30, 20, 15],
+    swarm_sizes: Sequence[int] = (30, 20, 15),
     distractor_count: int = 40,
     seed: int = 100,
 ) -> tuple[list[BenchmarkItem], dict[str, int]]:
@@ -510,6 +511,49 @@ def _find_exact_hamming_variant(
     )
 
 
+def _build_hamming_boundary_items(
+    *,
+    base_ham: Image.Image,
+    cluster_id: str,
+    prefix: str,
+    target_exact: int,
+    target_beyond: int,
+    max_diff_ratio: float,
+    seed: int,
+    verifier: DiffMaskVerifier,
+) -> tuple[list[BenchmarkItem], dict[str, int]]:
+    """Build exact in-threshold and just-beyond pHash Hamming boundary items."""
+    ham_exact = _find_exact_hamming_variant(
+        base_ham,
+        target_hamming=target_exact,
+        max_diff_ratio=max_diff_ratio,
+        seed=seed + 1,
+        verifier=verifier,
+    )
+    ham_beyond = _find_exact_hamming_variant(
+        base_ham,
+        target_hamming=target_beyond,
+        max_diff_ratio=max_diff_ratio,
+        seed=seed + 2,
+        verifier=verifier,
+        must_differ_from=[(ham_exact, target_exact)],
+    )
+    assert hamming_distance(compute_phash(base_ham), compute_phash(ham_exact)) == target_exact
+    assert hamming_distance(compute_phash(base_ham), compute_phash(ham_beyond)) == target_beyond
+    assert verifier.verify(base_ham, ham_beyond).diff_ratio <= max_diff_ratio
+
+    built = [
+        BenchmarkItem(filename=f"{prefix}_base.png", image=base_ham, cluster_id=cluster_id),
+        BenchmarkItem(
+            filename=f"{prefix}_member_exact.png", image=ham_exact, cluster_id=cluster_id
+        ),
+        BenchmarkItem(
+            filename=f"{prefix}_distractor_beyond.png", image=ham_beyond, cluster_id=None
+        ),
+    ]
+    return built, {cluster_id: 2}
+
+
 def build_boundary_dataset(
     seed: int = 400,
     mode: DiscoveryMode = "confirmed",
@@ -573,34 +617,18 @@ def build_boundary_dataset(
         )
 
         # Mini-cluster B: exact Hamming confirmed boundary (4 vs 6; pHash weights are even)
-        c_ham = "boundary_confirmed_hamming"
-        ground_truth_counts[c_ham] = 2
-        ham_exact = _find_exact_hamming_variant(
-            base_ham, target_hamming=4, max_diff_ratio=0.045, seed=seed + 101, verifier=verifier
-        )
-        ham_beyond = _find_exact_hamming_variant(
-            base_ham,
-            target_hamming=6,
+        ham_items, ham_counts = _build_hamming_boundary_items(
+            base_ham=base_ham,
+            cluster_id="boundary_confirmed_hamming",
+            prefix="conf_ham",
+            target_exact=4,
+            target_beyond=6,
             max_diff_ratio=0.045,
-            seed=seed + 102,
+            seed=seed + 100,
             verifier=verifier,
-            must_differ_from=[(ham_exact, 4)],
         )
-        assert hamming_distance(compute_phash(base_ham), compute_phash(ham_exact)) == 4
-        assert hamming_distance(compute_phash(base_ham), compute_phash(ham_beyond)) == 6
-        assert verifier.verify(base_ham, ham_beyond).diff_ratio <= 0.045
-
-        items.extend(
-            [
-                BenchmarkItem(filename="conf_ham_base.png", image=base_ham, cluster_id=c_ham),
-                BenchmarkItem(
-                    filename="conf_ham_member_exact.png", image=ham_exact, cluster_id=c_ham
-                ),
-                BenchmarkItem(
-                    filename="conf_ham_distractor_beyond.png", image=ham_beyond, cluster_id=None
-                ),
-            ]
-        )
+        items.extend(ham_items)
+        ground_truth_counts.update(ham_counts)
     else:
         # Mini-cluster A: exact DiffMask variants boundary (exact 0.35 vs 0.37)
         c_diff = "boundary_variants_diff"
@@ -629,34 +657,18 @@ def build_boundary_dataset(
         )
 
         # Mini-cluster B: exact Hamming variants boundary (12 vs 14; pHash weights are even)
-        c_ham = "boundary_variants_hamming"
-        ground_truth_counts[c_ham] = 2
-        ham_exact = _find_exact_hamming_variant(
-            base_ham, target_hamming=12, max_diff_ratio=0.30, seed=seed + 201, verifier=verifier
-        )
-        ham_beyond = _find_exact_hamming_variant(
-            base_ham,
-            target_hamming=14,
+        ham_items, ham_counts = _build_hamming_boundary_items(
+            base_ham=base_ham,
+            cluster_id="boundary_variants_hamming",
+            prefix="var_ham",
+            target_exact=12,
+            target_beyond=14,
             max_diff_ratio=0.30,
-            seed=seed + 202,
+            seed=seed + 200,
             verifier=verifier,
-            must_differ_from=[(ham_exact, 12)],
         )
-        assert hamming_distance(compute_phash(base_ham), compute_phash(ham_exact)) == 12
-        assert hamming_distance(compute_phash(base_ham), compute_phash(ham_beyond)) == 14
-        assert verifier.verify(base_ham, ham_beyond).diff_ratio <= 0.30
-
-        items.extend(
-            [
-                BenchmarkItem(filename="var_ham_base.png", image=base_ham, cluster_id=c_ham),
-                BenchmarkItem(
-                    filename="var_ham_member_exact.png", image=ham_exact, cluster_id=c_ham
-                ),
-                BenchmarkItem(
-                    filename="var_ham_distractor_beyond.png", image=ham_beyond, cluster_id=None
-                ),
-            ]
-        )
+        items.extend(ham_items)
+        ground_truth_counts.update(ham_counts)
 
     return items, ground_truth_counts
 

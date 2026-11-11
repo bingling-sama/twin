@@ -36,6 +36,8 @@ htmlcov/
 
 # Benchmark outputs
 bench_results.json
+bench_cluster_results.json
+benchmarks/cluster_report.md
 
 # Logs
 *.log

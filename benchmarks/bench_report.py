@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from typing import Any
 
 import numpy as np
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _fmt_mb(mb: float) -> str:
@@ -117,11 +120,41 @@ def _stats_p95(stats: dict[str, Any]) -> float:
     return float(stats.get("max", stats.get("mean", 0.0)))
 
 
-def _machine_os_label(machine: dict[str, Any]) -> str:
-    sys_name = str(machine.get("system") or "").strip()
-    os_val = machine.get("os")
-    distro = str(os_val.get("distro") or "").strip() if isinstance(os_val, dict) else ""
-    return distro or sys_name
+def _calc_delta_pct(current: float, baseline: float) -> float:
+    """Return percentage delta of current relative to a positive baseline."""
+    if baseline <= 0:
+        return 0.0
+    return (current - baseline) / baseline * 100.0
+
+
+def _extract_env_fields(machine: dict[str, Any]) -> dict[str, str]:
+    """Extract required hardware, OS, and runtime fields from machine_info."""
+    cpu = machine.get("cpu") if isinstance(machine.get("cpu"), dict) else {}
+    gpu = machine.get("gpu") if isinstance(machine.get("gpu"), dict) else {}
+    pkgs = machine.get("packages") if isinstance(machine.get("packages"), dict) else {}
+    return {
+        "OS": str(machine.get("system") or "").strip(),
+        "CPU": str(cpu.get("brand_raw") or "").strip(),
+        "Python": str(machine.get("python_version") or "").strip(),
+        "GPU": str(gpu.get("name") or "").strip(),
+        "Torch": str(pkgs.get("torch") or "").strip(),
+        "Faiss": str(pkgs.get("faiss") or "").strip(),
+        "Faiss GPU": str(pkgs.get("faiss_gpu") or "").strip(),
+        "Pillow": str(pkgs.get("PIL") or "").strip(),
+    }
+
+
+def _extract_provenance_fields(machine: dict[str, Any]) -> dict[str, str]:
+    """Extract required source digest and dataset fingerprint provenance fields."""
+    meta = (
+        machine.get("cluster_metadata")
+        if isinstance(machine.get("cluster_metadata"), dict)
+        else {}
+    )
+    return {
+        "dataset_fingerprint": str(meta.get("dataset_fingerprint") or "").strip(),
+        "source_digest": str(meta.get("source_digest") or "").strip(),
+    }
 
 
 def evaluate_regression(
@@ -130,7 +163,7 @@ def evaluate_regression(
     fail_threshold: float,
     allow_cross_env: bool = False,
 ) -> list[str]:
-    """Evaluate median & p95 regression and environment compatibility against baseline.
+    """Evaluate median & p95 regression and environment/provenance compatibility.
 
     Returns a list of error strings (empty means regression gate passed).
     """
@@ -147,22 +180,45 @@ def evaluate_regression(
 
     res_machine = results.get("machine_info") or {}
     bl_machine = baseline.get("machine_info") or {}
-    res_sys = str(res_machine.get("system") or "").strip()
-    bl_sys = str(bl_machine.get("system") or "").strip()
-    res_cpu = str((res_machine.get("cpu") or {}).get("brand_raw") or "").strip()
-    bl_cpu = str((bl_machine.get("cpu") or {}).get("brand_raw") or "").strip()
 
+    res_env = _extract_env_fields(res_machine)
+    bl_env = _extract_env_fields(bl_machine)
+    missing_env: list[str] = []
     env_mismatches: list[str] = []
-    if res_sys and bl_sys and res_sys != bl_sys:
-        env_mismatches.append(f"OS mismatch ({bl_sys} vs {res_sys})")
-    if res_cpu and bl_cpu and res_cpu != bl_cpu:
-        env_mismatches.append(f"CPU mismatch ({bl_cpu!r} vs {res_cpu!r})")
+    for label, res_val in res_env.items():
+        bl_val = bl_env[label]
+        if not res_val or not bl_val:
+            missing_env.append(f"{label} (baseline={bl_val!r}, current={res_val!r})")
+        elif res_val != bl_val:
+            env_mismatches.append(f"{label} mismatch ({bl_val!r} vs {res_val!r})")
+
+    if missing_env:
+        errors.append("Missing required environment metadata: " + "; ".join(missing_env))
     if env_mismatches:
         msg = "Environment mismatch vs baseline: " + "; ".join(env_mismatches)
         if allow_cross_env:
             print(f"WARNING: {msg} (ignored due to --allow-cross-env)")
         else:
             errors.append(msg + " (pass --allow-cross-env to override)")
+
+    res_prov = _extract_provenance_fields(res_machine)
+    bl_prov = _extract_provenance_fields(bl_machine)
+    prov_issues: list[str] = []
+    for key, res_val in res_prov.items():
+        bl_val = bl_prov[key]
+        if not res_val or not bl_val:
+            prov_issues.append(f"missing {key} (baseline={bl_val!r}, current={res_val!r})")
+        elif not _SHA256_RE.match(res_val) or not _SHA256_RE.match(bl_val):
+            prov_issues.append(
+                f"invalid non-64-char SHA-256 {key} (baseline={bl_val!r}, current={res_val!r})"
+            )
+        elif res_val != bl_val:
+            prov_issues.append(f"{key} mismatch ({bl_val[:16]}... vs {res_val[:16]}...)")
+    if prov_issues:
+        errors.append(
+            "Provenance check failed (not overridden by --allow-cross-env): "
+            + "; ".join(prov_issues)
+        )
 
     res_lookup = {bm["name"]: bm for bm in res_benchmarks}
     bl_lookup = {bm["name"]: bm for bm in bl_benchmarks}
@@ -183,7 +239,7 @@ def evaluate_regression(
         bl_p95 = _stats_p95(bl_stats)
 
         if bl_med > 0:
-            med_delta = (med - bl_med) / bl_med * 100.0
+            med_delta = _calc_delta_pct(med, bl_med)
             if med_delta > fail_threshold:
                 errors.append(
                     f"Median regression > {fail_threshold:.1f}% on {name}: "
@@ -191,7 +247,7 @@ def evaluate_regression(
                 )
 
         if bl_p95 > 0:
-            p95_delta = (p95 - bl_p95) / bl_p95 * 100.0
+            p95_delta = _calc_delta_pct(p95, bl_p95)
             if p95_delta > fail_threshold:
                 errors.append(
                     f"P95 regression > {fail_threshold:.1f}% on {name}: "
@@ -406,8 +462,8 @@ def print_report(results: dict, baseline: dict | None = None) -> None:
                 bl_stats = baseline_lookup[full_name]["stats"]
                 bl_med = _stats_median(bl_stats)
                 bl_p95 = _stats_p95(bl_stats)
-                med_delta = ((med - bl_med) / bl_med * 100) if bl_med > 0 else 0.0
-                p95_delta = ((p95 - bl_p95) / bl_p95 * 100) if bl_p95 > 0 else 0.0
+                med_delta = _calc_delta_pct(med, bl_med)
+                p95_delta = _calc_delta_pct(p95, bl_p95)
                 if abs(med_delta) > 5 or abs(p95_delta) > 5:
                     arrow = "▲" if max(med_delta, p95_delta) > 0 else "▼"
                     reg_str = f"  {arrow} med:{med_delta:+.1f}% p95:{p95_delta:+.1f}%"
