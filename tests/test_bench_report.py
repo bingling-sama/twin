@@ -298,7 +298,27 @@ def _build_valid_cluster_report(
             "",
             "## 🔬 Telemetry & Fine-Grained Latency Decomposition",
             "",
-            "Pairs verified (1,000.0 pairs/s, denominator: end_to_end_ms)",
+            "> **Decomposition**: `end_to_end_ms` = `instrumented_stage_ms` "
+            "(`recall` + `io` + `verify`) + `unattributed_ms` "
+            "(loop branching, metadata lookups, elimination, harness overhead); "
+            "`service_query_ms` records internal `discover_similar_batches()` elapsed time; "
+            "`pairs/s` uses `end_to_end_ms` as denominator.",
+            "",
+            "| Scenario | Service / Stages / Wall | Binary Recall | Parallel I/O | "
+            "DiffMask Verify | Unattributed (e2e) | Verified Pairs (e2e) |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+    )
+    for name in _EXPECTED_SCENARIO_NAMES:
+        if name == omit_scenario:
+            continue
+        lines.append(
+            f"| `{name}` | 8.0ms / 7.0ms / 10.0ms | 2.0ms (28.6%) | 2.0ms (28.6%) | "
+            f"3.0ms (42.9%) | 3.0ms | 10 (1,000 pairs/s, denominator: end_to_end_ms) |"
+        )
+
+    lines.extend(
+        [
             "",
             "## 📝 Detailed Scenario Analysis",
             "",
@@ -306,11 +326,33 @@ def _build_valid_cluster_report(
     )
     for name in _EXPECTED_SCENARIO_NAMES:
         if name != omit_scenario:
+            spec = _SCENARIO_REPRO_SPECS[name]
             lines.extend(
                 [
-                    f"### Scenario: {name} (`mode={_SCENARIO_REPRO_SPECS[name]['mode']}`)",
-                    "- **Instrumented Stages Total**: 5.00 ms (instrumented stages: 5.00 ms)",
-                    "- **Pairs**: 100.0 pairs/sec, denominator: end_to_end_ms",
+                    f"### Scenario: {name} (`mode={spec['mode']}`)",
+                    "- **Dataset Scale**: 100 items (2 GT clusters)",
+                    "- **Quality Risk**: `Clean`",
+                    "- **Wall-Clock Latency**: **10.00 ms** (service internal: 8.00 ms | "
+                    "instrumented stages: 7.00 ms) | "
+                    "**500.0 Probes/sec** (denominator: end_to_end_ms)",
+                    "- **Batches Formed**: 2 (covering 4 skins)",
+                    "- **Clustering Quality & Precision**:",
+                    "  - **Cluster Purity**: **100.0%** (100% pure batches: 100.0%, "
+                    "impure batches: 0, impure rate: 0.0%, wrong peers: 0)",
+                    "  - **Target Group Recall**: **100.0%** (2 ground-truth groups)",
+                    "  - **Member Coverage**: **100.0%** "
+                    "(fraction of target GT cluster members—including seeds and peers—recovered)",
+                    "  - **Max Observed DiffRatio**: 0.0000 (strictly within configured limits)",
+                    "- **Stages Telemetry & Latency Breakdown (Share of Instrumented Stages)**:",
+                    "  - **Binary Recall**: 2.00 ms (28.6%) | 10 candidates recalled",
+                    "  - **Parallel Image I/O**: 2.00 ms (28.6%) | "
+                    "10 images decoded in thread pool",
+                    "  - **DiffMask Verify**: 3.00 ms (42.9%) | 10 pairs verified "
+                    "(1,000.0 pairs/sec, denominator: end_to_end_ms)",
+                    "  - **Instrumented Stages Total**: 7.00 ms | "
+                    "**Unattributed Overhead (e2e - stages)**: 3.00 ms "
+                    "(loop branching, metadata lookups, elimination, harness/FFI overhead)",
+                    "",
                 ]
             )
     return "\n".join(lines)
@@ -543,4 +585,72 @@ def test_verify_cluster_report_enforces_settings_runtime_zip_and_repro_matrix(
         )
         == 1
     )
+
+
+def test_verify_cluster_report_rejects_missing_scenario_telemetry_and_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_head = "0123456789abcdef" * 2 + "01234567"
+    monkeypatch.setattr(
+        "benchmarks.cluster_bench._git_head_and_clean",
+        lambda _root=None: (fake_head, True),
+    )
+    base_text = _build_valid_cluster_report(commit_line=f"{fake_head} (clean)")
+
+    # 1. Reviewer's reproduction sample:
+    # Delete all telemetry rows & metrics, keeping only scenario titles & global keywords
+    gutted_lines = [
+        line
+        for line in base_text.splitlines()
+        if not (
+            line.startswith("- **")
+            or line.startswith("  - **")
+            or (line.startswith("| `") and "denominator: end_to_end_ms" in line)
+        )
+    ]
+    gutted_lines.append("denominator: end_to_end_ms and instrumented stages:")
+    gutted_report = tmp_path / "gutted.md"
+    gutted_report.write_text("\n".join(gutted_lines), encoding="utf-8")
+    gutted_errs = verify_cluster_report(gutted_report)
+    assert len(gutted_errs) > 0
+    assert any("missing Wall-Clock Latency" in e for e in gutted_errs)
+    assert any("Missing Telemetry Decomposition row" in e for e in gutted_errs)
+    assert cluster_bench_main(["--verify-report", str(gutted_report)]) == 1
+
+    # 2. Omit a single scenario's telemetry row in Telemetry table
+    omit_telemetry_report = tmp_path / "omit_telemetry.md"
+    target_scen = "Exact Duplicate Swarms"
+    omit_tel_lines = [
+        line
+        for line in base_text.splitlines()
+        if not (line.startswith(f"| `{target_scen}`") and "denominator: end_to_end_ms" in line)
+    ]
+    omit_telemetry_report.write_text("\n".join(omit_tel_lines), encoding="utf-8")
+    tel_errs = verify_cluster_report(omit_telemetry_report)
+    assert any(
+        f"Missing Telemetry Decomposition row for scenario: {target_scen}" in e for e in tel_errs
+    )
+
+    # 3. Omit service internal in Detailed Scenario section
+    omit_service_report = tmp_path / "omit_service.md"
+    omit_svc_text = base_text.replace("service internal: 8.00 ms | ", "")
+    omit_service_report.write_text(omit_svc_text, encoding="utf-8")
+    svc_errs = verify_cluster_report(omit_service_report)
+    assert any("missing service internal ms value" in e for e in svc_errs)
+
+    # 4. Omit impure batches count in Detailed Scenario section
+    omit_impure_report = tmp_path / "omit_impure.md"
+    omit_impure_text = base_text.replace("impure batches: 0, ", "")
+    omit_impure_report.write_text(omit_impure_text, encoding="utf-8")
+    imp_errs = verify_cluster_report(omit_impure_report)
+    assert any("missing impure batches count" in e for e in imp_errs)
+
+    # 5. Omit stage breakdown telemetry in Detailed Scenario section
+    omit_stage_report = tmp_path / "omit_stage.md"
+    omit_stage_text = base_text.replace(
+        "  - **Binary Recall**: 2.00 ms (28.6%) | 10 candidates recalled", ""
+    )
+    omit_stage_report.write_text(omit_stage_text, encoding="utf-8")
+    stg_errs = verify_cluster_report(omit_stage_report)
+    assert any("missing Binary Recall stage telemetry" in e for e in stg_errs)
 

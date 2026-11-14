@@ -501,6 +501,21 @@ def _parse_markdown_section_rows(report_text: str, heading: str) -> list[list[st
     return rows
 
 
+def _extract_scenario_block(report_text: str, scenario_name: str) -> str | None:
+    """Extract markdown text belonging to a detailed scenario subsection."""
+    start_tag = f"### Scenario: {scenario_name}"
+    start_idx = report_text.find(start_tag)
+    if start_idx == -1:
+        return None
+    end_candidates = [
+        report_text.find("### Scenario:", start_idx + len(start_tag)),
+        report_text.find("## ", start_idx + len(start_tag)),
+    ]
+    valid_ends = [pos for pos in end_candidates if pos != -1]
+    end_idx = min(valid_ends) if valid_ends else len(report_text)
+    return report_text[start_idx:end_idx]
+
+
 def verify_cluster_report(
     report_path: Path | str,
     *,
@@ -670,6 +685,18 @@ def verify_cluster_report(
         scen = cells[0].strip("` ")
         repro_rows[scen] = cells
 
+    telemetry_rows: dict[str, list[str]] = {}
+    for cells in _parse_markdown_section_rows(
+        text, "## 🔬 Telemetry & Fine-Grained Latency Decomposition"
+    ):
+        if len(cells) != 7:
+            errors.append(
+                f"Telemetry Decomposition row must have 7 columns, got {len(cells)}: {cells}"
+            )
+            continue
+        scen = cells[0].strip("` ")
+        telemetry_rows[scen] = cells
+
     for scenario_name, spec in _SCENARIO_REPRO_SPECS.items():
         if scenario_name not in summary_rows:
             errors.append(f"Missing Executive Summary row for scenario: {scenario_name}")
@@ -736,8 +763,88 @@ def verify_cluster_report(
                     f"expected {expected_repro}, got {actual_repro}"
                 )
 
-        if f"### Scenario: {scenario_name} " not in text:
+        if scenario_name not in telemetry_rows:
+            errors.append(f"Missing Telemetry Decomposition row for scenario: {scenario_name}")
+        else:
+            tcells = telemetry_rows[scenario_name]
+            if not re.search(r"^[0-9.]+ms\s*/\s*[0-9.]+ms\s*/\s*[0-9.]+ms$", tcells[1]):
+                errors.append(
+                    f"Scenario {scenario_name} missing Service/Stages/Wall format: {tcells[1]!r}"
+                )
+            if not re.search(r"^[0-9.]+ms\s*\([0-9.]+%\)$", tcells[2]):
+                errors.append(
+                    f"Scenario {scenario_name} missing Binary Recall format: {tcells[2]!r}"
+                )
+            if not re.search(r"^[0-9.]+ms\s*\([0-9.]+%\)$", tcells[3]):
+                errors.append(
+                    f"Scenario {scenario_name} missing Parallel I/O format: {tcells[3]!r}"
+                )
+            if not re.search(r"^[0-9.]+ms\s*\([0-9.]+%\)$", tcells[4]):
+                errors.append(
+                    f"Scenario {scenario_name} missing DiffMask Verify format: {tcells[4]!r}"
+                )
+            if not re.search(r"^[0-9.]+ms$", tcells[5]):
+                errors.append(
+                    f"Scenario {scenario_name} missing Unattributed (e2e) format: {tcells[5]!r}"
+                )
+            if "denominator: end_to_end_ms" not in tcells[6]:
+                errors.append(
+                    f"Scenario {scenario_name} missing denominator in pairs: {tcells[6]!r}"
+                )
+
+        scen_block = _extract_scenario_block(text, scenario_name)
+        if not scen_block:
             errors.append(f"Missing Detailed Scenario section for: {scenario_name}")
+        else:
+            if not re.search(r"\*\*Wall-Clock Latency\*\*:\s*\*\*[0-9.]+ ms\*\*", scen_block):
+                errors.append(f"Scenario {scenario_name} missing Wall-Clock Latency ms value.")
+            if not re.search(r"service internal:\s*[0-9.]+ ms", scen_block):
+                errors.append(f"Scenario {scenario_name} missing service internal ms value.")
+            if not re.search(r"instrumented stages:\s*[0-9.]+ ms", scen_block):
+                errors.append(f"Scenario {scenario_name} missing instrumented stages ms value.")
+            if "denominator: end_to_end_ms" not in scen_block:
+                errors.append(f"Scenario {scenario_name} missing denominator: end_to_end_ms.")
+            if not re.search(r"- \*\*Quality Risk\*\*:\s*`[^`]+`", scen_block):
+                errors.append(f"Scenario {scenario_name} missing Quality Risk tag.")
+            if not re.search(r"\*\*Cluster Purity\*\*:\s*\*\*[0-9.]+%\*\*", scen_block):
+                errors.append(f"Scenario {scenario_name} missing Cluster Purity percentage.")
+            if not re.search(r"impure batches:\s*\d+", scen_block):
+                errors.append(f"Scenario {scenario_name} missing impure batches count.")
+            if not re.search(r"impure rate:\s*[0-9.]+%", scen_block):
+                errors.append(f"Scenario {scenario_name} missing impure rate percentage.")
+            if not re.search(r"wrong peers:\s*\d+", scen_block):
+                errors.append(f"Scenario {scenario_name} missing wrong peers count.")
+            if not re.search(r"\*\*Target Group Recall\*\*:\s*\*\*[0-9.]+%\*\*", scen_block):
+                errors.append(f"Scenario {scenario_name} missing Target Group Recall percentage.")
+            if not re.search(r"\*\*Member Coverage\*\*:\s*\*\*[0-9.]+%\*\*", scen_block):
+                errors.append(f"Scenario {scenario_name} missing Member Coverage percentage.")
+            rec_re = (
+                r"\*\*Binary Recall\*\*:\s*[0-9.]+ ms\s*\([0-9.]+%\)\s*\|\s*"
+                r"\d+\s*candidates recalled"
+            )
+            if not re.search(rec_re, scen_block):
+                errors.append(f"Scenario {scenario_name} missing Binary Recall stage telemetry.")
+            io_re = (
+                r"\*\*Parallel Image I/O\*\*:\s*[0-9.]+ ms\s*\([0-9.]+%\)\s*\|\s*"
+                r"\d+\s*images decoded in thread pool"
+            )
+            if not re.search(io_re, scen_block):
+                errors.append(
+                    f"Scenario {scenario_name} missing Parallel Image I/O stage telemetry."
+                )
+            if not re.search(
+                r"\*\*DiffMask Verify\*\*:\s*[0-9.]+ ms\s*\([0-9.]+%\)\s*\|\s*\d+\s*pairs verified",
+                scen_block,
+            ):
+                errors.append(f"Scenario {scenario_name} missing DiffMask Verify stage telemetry.")
+            stages_re = (
+                r"\*\*Instrumented Stages Total\*\*:\s*[0-9.]+ ms\s*\|\s*"
+                r"\*\*Unattributed Overhead \(e2e - stages\)\*\*:\s*[0-9.]+ ms"
+            )
+            if not re.search(stages_re, scen_block):
+                errors.append(
+                    f"Scenario {scenario_name} missing Instrumented Stages Total or Unattributed."
+                )
 
     if "denominator: end_to_end_ms" not in text or "instrumented stages:" not in text:
         errors.append("Missing explicit denominator or instrumented stage breakdown labels.")

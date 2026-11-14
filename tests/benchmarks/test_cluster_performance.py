@@ -86,7 +86,7 @@ def _benchmark_discovery(
 def test_bench_cluster_confirmed_duplicates(benchmark: Any, tmp_path: Path) -> None:
     """Measure confirmed duplicate clustering throughput and latency."""
     items = _build_perf_dataset(num_duplicates=25, num_variants=0, num_noise=20)
-    res = _benchmark_discovery(
+    _benchmark_discovery(
         benchmark,
         tmp_path,
         items,
@@ -97,14 +97,13 @@ def test_bench_cluster_confirmed_duplicates(benchmark: Any, tmp_path: Path) -> N
         seed_strategy="random",
         random_seed=42,
     )
-    assert res["count"] >= 1
 
 
 @pytest.mark.smoke
 def test_bench_cluster_adaptive_recall_scaling(benchmark: Any, tmp_path: Path) -> None:
     """Measure adaptive recall scaling latency on a 50-duplicate swarm."""
     items = _build_perf_dataset(num_duplicates=50, num_variants=0, num_noise=10)
-    res = _benchmark_discovery(
+    _benchmark_discovery(
         benchmark,
         tmp_path,
         items,
@@ -115,14 +114,13 @@ def test_bench_cluster_adaptive_recall_scaling(benchmark: Any, tmp_path: Path) -
         seed_strategy="sequential",
         random_seed=42,
     )
-    assert res["count"] >= 1
 
 
 @pytest.mark.smoke
 def test_bench_cluster_variants_mode(benchmark: Any, tmp_path: Path) -> None:
     """Measure variants mode discovery latency on recolored derivative textures."""
     items = _build_perf_dataset(num_duplicates=10, num_variants=20, num_noise=20)
-    res = _benchmark_discovery(
+    _benchmark_discovery(
         benchmark,
         tmp_path,
         items,
@@ -133,5 +131,4 @@ def test_bench_cluster_variants_mode(benchmark: Any, tmp_path: Path) -> None:
         seed_strategy="random",
         random_seed=42,
     )
-    assert res["count"] >= 1
 

@@ -277,10 +277,11 @@ def evaluate_cluster_scenario(
 ) -> ScenarioResult:
     """Run discovery on benchmark items in an isolated sandbox and evaluate metrics."""
     if indexer_instance is not None:
-        _assert_empty_sandbox_indexer(indexer_instance)
-        sandbox_indexer = indexer_instance
-    else:
-        sandbox_indexer = Indexer()
+        raise ValueError(
+            "evaluate_cluster_scenario creates and owns its sandbox Indexer; "
+            "caller-owned Indexer instances are rejected."
+        )
+    sandbox_indexer = Indexer()
 
     with tempfile.TemporaryDirectory(prefix="twin_cluster_bench_") as tmp_dir:
         img_dir = Path(tmp_dir) / "images"
@@ -354,7 +355,7 @@ def evaluate_cluster_scenario(
             else:
                 wrong_peer_count += 1
 
-        if seed_cluster is None or matches == 0:
+        if seed_cluster is None:
             purity = 0.0
         else:
             purity = (matches + 1) / batch_size_actual

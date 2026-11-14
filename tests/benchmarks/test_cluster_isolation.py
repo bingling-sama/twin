@@ -229,13 +229,25 @@ def test_sandbox_rejects_singleton_non_empty_indexer_or_duplicates(tmp_path: Pat
     with pytest.raises(ValueError, match="non-singleton Indexer"):
         populate_cluster_index(items, tmp_dir=safe_dir / "b", indexer_instance=indexer)
 
-    with pytest.raises(ValueError, match="non-singleton Indexer"):
+    with pytest.raises(ValueError, match="caller-owned Indexer instances are rejected"):
         evaluate_cluster_scenario(
             scenario_name="Reject Singleton",
             items=items,
             ground_truth_counts={"cluster_dup_1": 2},
             indexer_instance=indexer,
         )
+
+    # Empty caller-owned Indexer must also be rejected and left untouched
+    empty_caller_idx = Indexer()
+    with pytest.raises(ValueError, match="caller-owned Indexer instances are rejected"):
+        evaluate_cluster_scenario(
+            scenario_name="Reject Empty Caller",
+            items=items,
+            ground_truth_counts={"cluster_dup_1": 2},
+            indexer_instance=empty_caller_idx,
+        )
+    assert empty_caller_idx.get_count("skin") == 0
+    assert empty_caller_idx.get_count("cape") == 0
 
     dup_items = [items[0], items[0]]
     with pytest.raises(ValueError, match="Duplicate benchmark filename"):
@@ -250,7 +262,7 @@ def test_sandbox_rejects_singleton_non_empty_indexer_or_duplicates(tmp_path: Pat
     with pytest.raises(ValueError, match="non-empty caller-owned Indexer"):
         populate_cluster_index(items, tmp_dir=safe_dir / "d", indexer_instance=caller_idx)
 
-    with pytest.raises(ValueError, match="non-empty caller-owned Indexer"):
+    with pytest.raises(ValueError, match="caller-owned Indexer instances are rejected"):
         evaluate_cluster_scenario(
             scenario_name="Reject Populated Caller",
             items=items,
@@ -265,7 +277,7 @@ def test_sandbox_rejects_singleton_non_empty_indexer_or_duplicates(tmp_path: Pat
     # Also reject Indexer containing metadata entries even without vectors
     meta_only_idx = Indexer()
     meta_only_idx._metadatas["skin"].append({"filename": "orphan_meta.png"})
-    with pytest.raises(ValueError, match="non-empty caller-owned Indexer"):
+    with pytest.raises(ValueError, match="caller-owned Indexer instances are rejected"):
         evaluate_cluster_scenario(
             scenario_name="Reject Meta-Only Caller",
             items=items,

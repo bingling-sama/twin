@@ -283,6 +283,45 @@ def test_cluster_noise_seed_purity_and_wrong_peer_accounting() -> None:
     assert res.wrong_peer_count == 1
 
 
+def test_cluster_labeled_seed_all_wrong_peers_purity_and_zero_recovery() -> None:
+    """Labeled seed with all wrong peers reports purity=1/batch_size, but recall & coverage are 0.
+    """
+    base = create_base_skin(seed=805, valid_pixel_count=3000)
+    arr = np.array(base).copy()
+    coords = np.argwhere(arr[:, :, 3] > 10)
+    # Tweak slightly so it matches within confirmed mode (diff_ratio <= 0.05, Hamming <= 4)
+    for y, x in coords[:20]:
+        arr[y, x, 2] = (int(arr[y, x, 2]) + 10) % 256
+    peer_img = Image.fromarray(arr, mode="RGBA")
+
+    # Seed is labeled with 'gt_seed', but peer belongs to 'gt_other'
+    items = [
+        BenchmarkItem(filename="labeled_seed.png", image=base, cluster_id="gt_seed"),
+        BenchmarkItem(filename="labeled_other.png", image=peer_img, cluster_id="gt_other"),
+    ]
+    res = evaluate_cluster_scenario(
+        scenario_name="Labeled Seed All Wrong Peers Test",
+        items=items,
+        ground_truth_counts={"gt_seed": 1, "gt_other": 1},
+        mode="confirmed",
+        batch_size=5,
+        max_batches=5,
+        seed_strategy="sequential",
+    )
+    assert res.discovered_batches == 1
+    # Batch size actual is 2 (seed + 1 peer). Matches is 0. Purity = (0 + 1) / 2 = 0.5 (50%)
+    assert res.avg_batch_purity == pytest.approx(0.5)
+    assert res.perfect_batches_ratio == 0.0
+    assert res.impure_batches_count == 1
+    assert res.impure_batch_rate == 1.0
+    assert res.wrong_peer_count == 1
+
+    # Crucial invariant: Group recovery requires at least one matching same-cluster peer.
+    # Because matches == 0, Recall and Coverage must strictly remain 0.0!
+    assert res.cluster_recall_rate == 0.0
+    assert res.member_coverage_rate == 0.0
+
+
 def test_evaluator_impure_batch_rate_and_exact_purity_metrics() -> None:
     """Mixed pure + impure batches must compute exact impure_batch_rate and risk flags."""
     pure_img = create_base_skin(seed=910, valid_pixel_count=3000)
